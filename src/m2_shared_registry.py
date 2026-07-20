@@ -523,7 +523,8 @@ def ensure_package_m2_run_id(package_root: Path) -> str:
 
 
 def write_binding(package_root: Path, binding: dict[str, Any]) -> dict[str, Any]:
-    # READY_SHARED bindings are immutable.
+    # READY_SHARED may not regress to a weaker state. Same canonical_run_id may be
+    # refreshed (alias / source_drift metadata) when the loop re-resolves.
     path = Path(package_root) / 'm2_binding.json'
     existing = read_json(path) if path.is_file() else None
     if (
@@ -536,11 +537,14 @@ def write_binding(package_root: Path, binding: dict[str, Any]) -> dict[str, Any]
         isinstance(existing, dict)
         and existing.get('state') == BINDING_READY
         and binding.get('state') == BINDING_READY
-        and existing.get('registry_record_sha256')
-        and binding.get('registry_record_sha256')
-        and existing.get('registry_record_sha256') != binding.get('registry_record_sha256')
+        and existing.get('canonical_run_id')
+        and binding.get('canonical_run_id')
+        and existing.get('canonical_run_id') != binding.get('canonical_run_id')
     ):
-        raise M2SharedRegistryError('READY_SHARED registry record hash changed')
+        raise M2SharedRegistryError(
+            'READY_SHARED canonical_run_id may not change; '
+            f"{existing.get('canonical_run_id')} -> {binding.get('canonical_run_id')}"
+        )
     atomic_write_json(path, binding)
     canonical = binding.get('canonical_run_id')
     if isinstance(canonical, str) and canonical.strip():
@@ -575,6 +579,7 @@ def resolve_m2_binding(
     )
     structural_key = keys['structural_key']
     proof_key = keys['proof_key']
+    existing = read_binding(package_root)
     record, hit = lookup_shared_m2_reusable(
         persistent_root,
         structural_key,
@@ -650,6 +655,14 @@ def resolve_m2_binding(
             'current_source_hash': source_hash,
             'certification_status': 'NOT_CERTIFIED',
         }
+        # Idempotent: same shared run already bound → refresh metadata only.
+        if (
+            isinstance(existing, dict)
+            and existing.get('state') == BINDING_READY
+            and existing.get('canonical_run_id') == binding['canonical_run_id']
+        ):
+            binding['verified_at'] = existing.get('verified_at') or binding['verified_at']
+            binding['lookup_hit'] = hit or existing.get('lookup_hit')
         return write_binding(package_root, binding)
 
     if record and record.get('registry_state') in {

@@ -287,6 +287,28 @@ def test_ready_binding_immutable(tmp_path: Path) -> None:
             'canonical_run_id': 'M2-SHARED-x',
             'mode': 'NEED_CANONICAL_M2',
         })
+    with pytest.raises(M2SharedRegistryError, match='canonical_run_id'):
+        write_binding(pkg, {
+            'schema_version': 2,
+            'state': BINDING_READY,
+            'structural_key': 's' * 64,
+            'proof_key': 'p' * 64,
+            'canonical_run_id': 'M2-SHARED-other',
+            'registry_record_sha256': 'r2',
+            'mode': 'REUSE_SHARED',
+        })
+    # Same canonical may refresh registry hash (alias re-resolve).
+    refreshed = write_binding(pkg, {
+        'schema_version': 2,
+        'state': BINDING_READY,
+        'structural_key': 's' * 64,
+        'proof_key': 'p' * 64,
+        'canonical_run_id': 'M2-SHARED-x',
+        'registry_record_sha256': 'r2-aliased',
+        'mode': 'REUSE_SHARED_SOURCE_DRIFT',
+        'source_drift': True,
+    })
+    assert refreshed['registry_record_sha256'] == 'r2-aliased'
 
 
 def test_ensure_package_m2_run_id_syncs_from_binding(tmp_path: Path) -> None:
