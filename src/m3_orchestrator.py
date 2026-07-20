@@ -557,8 +557,12 @@ def create_or_resume_m3(
     allow_code_drift = bool(
         allow_code_drift or env_drift in {'1', 'true', 'yes', 'on'}
     )
+    # m2_audit_sha256: staged notebooks may rewrite audit/m2_accepted_parent.json
+    # (e.g. generated_at) while parent_run_id / report / checkpoint stay pinned.
+    # Live verify_accepted_m2_parent already re-checks audit content vs M2 artifacts.
     relax_fields = {
         'source_hash', 'notebook_hash', 'runtime_compatibility', 'backend_selection',
+        'm2_audit_sha256',
     } if allow_code_drift else set()
     runs_root = persistent_root / 'runs'
     runs_root.mkdir(parents=True, exist_ok=True)
@@ -629,8 +633,9 @@ def create_or_resume_m3(
                 'run_id': requested,
                 'drifted_fields': drifted,
                 'note': (
-                    'Controller source/runtime drifted since M3 run creation; '
-                    'config_hash and M2 parent identity remain pinned.'
+                    'Controller source/runtime and/or M2 audit file bytes drifted '
+                    'since M3 run creation; config_hash and M2 parent run/report/'
+                    'checkpoint identity remain pinned and re-verified.'
                 ),
             })
             print('WARNING: resuming M3 with code drift:', ', '.join(sorted(drifted)))

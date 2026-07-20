@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 
 from src.checkpoint import CheckpointManager, RunState
-from src.common import utc_now
+from src.common import atomic_write_json, read_json, utc_now
 from src.m3_config import M3Config
-from src.m3_orchestrator import create_or_resume_m3
+from src.m3_orchestrator import M3CompatibilityError, create_or_resume_m3
 from src.m3_parent import M3ParentError, verify_accepted_m2_parent
 from src.session_guard import SessionGuard
 from src.work_queue import WorkQueue
@@ -109,6 +109,37 @@ def test_m3_checkpoint_resume_and_fresh_process(tmp_path: Path) -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert 'M3_BOOTSTRAP' in completed.stdout
+
+
+def test_m3_resume_allows_audit_rewrite_under_code_drift(tmp_path: Path) -> None:
+    config, project = make_synthetic_accepted_m2(
+        tmp_path, _cpu_config(),
+    )
+    persistent = tmp_path / 'persist'
+    create_or_resume_m3(
+        persistent, config, project, run_id='M3-audit-drift',
+        test_report=passing_m3_test_report(),
+    )
+    audit_path = project / config.parent_audit_path
+    audit = read_json(audit_path)
+    assert isinstance(audit, dict)
+    audit['generated_at'] = '2099-01-01T00:00:00+00:00'
+    audit['note'] = 'rewritten after M3 create; parent identity unchanged'
+    atomic_write_json(audit_path, audit)
+    with pytest.raises(M3CompatibilityError, match='m2_audit_sha256'):
+        create_or_resume_m3(
+            persistent, config, project, run_id='M3-audit-drift',
+            test_report=passing_m3_test_report(),
+        )
+    resumed = create_or_resume_m3(
+        persistent, config, project, run_id='M3-audit-drift',
+        test_report=passing_m3_test_report(),
+        allow_code_drift=True,
+    )
+    assert resumed.state.run_id == 'M3-audit-drift'
+    drift = read_json(resumed.run_root / 'reports/code_drift.json')
+    assert isinstance(drift, dict)
+    assert 'm2_audit_sha256' in drift.get('drifted_fields', {})
 
 
 def test_m3_session_drain_checkpoints_and_resumes(tmp_path: Path) -> None:
