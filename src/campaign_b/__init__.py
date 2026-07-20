@@ -18,6 +18,7 @@ __all__ = [
     'run_mass_explore',
     'run_advance_selected',
     'run_gpu_m3_batch',
+    'run_pre_m6_batch',
 ]
 
 
@@ -40,4 +41,7 @@ def __getattr__(name: str):
     if name == 'run_gpu_m3_batch':
         from .gpu_m3_batch import run_gpu_m3_batch
         return run_gpu_m3_batch
+    if name == 'run_pre_m6_batch':
+        from .pre_m6_batch import run_pre_m6_batch
+        return run_pre_m6_batch
     raise AttributeError(name)
