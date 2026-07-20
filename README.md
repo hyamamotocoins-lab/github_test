@@ -46,7 +46,7 @@ certification_status = NOT_CERTIFIED
 | M3 | 受理済み・凍結 | 全18ゲート PASS、`CORE_REPRODUCED`、`NOT_CERTIFIED` |
 | M4 | 実装・実行完了、数学境界で停止 | 全18ゲート PASS、`M4_COMPLETE / BLOCKED_MATH / NOT_CERTIFIED` |
 | M5 | 実装完了・Paperspace 実行可 | 8 handoff obligations 閉鎖 → live `one_step_certificate/` → `M5_acceptance.json` |
-| M6 | 受理ゲートのみ・未実装 | `M5_acceptance.json`（`M5_COMPLETE`）後の multi-step certificate |
+| M6 | 実装・Paperspace 実行可 | LOCK 固定、`final_certificate/`、独立 verifier、`M6_acceptance.json` |
 
 M3 report は独立レビュー済みで、[audit/m3_accepted_parent.json](audit/m3_accepted_parent.json) に
 M3→M4 の受理根拠を固定しました。M4 の実装ゲートは完了し、derivative-only acceptance は
@@ -86,6 +86,14 @@ audit/m5_accepted_parent.json
 `certification_status` は Collatz 判定により `ONE_STEP_CERTIFIED` または検証済み
 `NOT_CERTIFIED`（`q_cert_lower ≥ 1`）のどちらかです。どちらでも `M5_COMPLETE` なら M6 に進めます。
 連続極限・質量ギャップは主張しません。
+
+M6 は `notebooks/70_m6_multistep_certificate.ipynb` から実行します。凍結 LOCK の下で
+3 段 singleton family inclusion と親 M5 influence majorant を `final_certificate/` に組立て、
+独立 verifier 後に `reports/M6_acceptance.json` を書きます。凍結 run ID:
+
+```text
+VALIDATED_RG_M6_RUN_ID=M6-20260720T061700Z-7c4e91a2b850
+```
 
 現在の完了 run は次です。いずれも外部永続ストレージ `/storage` に保存されています。
 
