@@ -1,0 +1,23 @@
+"""Machine-readable M5 status vocabulary."""
+
+from __future__ import annotations
+
+from typing import Final
+
+
+M5_RUN_ID_FROZEN: Final = 'M5-20260720T051020Z-c3800fceaa80'
+M4_PARENT_RUN_ID_FROZEN: Final = 'M4-20260720T021737Z-b9c9514fed11'
+
+M5_IMPLEMENTATION_IN_PROGRESS: Final = 'IMPLEMENTATION_IN_PROGRESS'
+M5_BLOCKED_IMPLEMENTATION: Final = 'BLOCKED_IMPLEMENTATION'
+M5_BLOCKED_MATH: Final = 'BLOCKED_MATH'
+M5_BLOCKED_RESOURCE: Final = 'BLOCKED_RESOURCE'
+M5_VERIFICATION_FAILED: Final = 'VERIFICATION_FAILED'
+M5_COMPLETE: Final = 'M5_COMPLETE'
+
+ONE_STEP_CERTIFIED: Final = 'ONE_STEP_CERTIFIED'
+NOT_CERTIFIED: Final = 'NOT_CERTIFIED'
+PROOF_OBLIGATIONS_OPEN: Final = 'M5_PROOF_OBLIGATIONS_OPEN'
+
+PROOF_OBLIGATIONS: Final[tuple[str, ...]] = tuple(f'P{index}' for index in range(12))
+CERTIFICATION_CHECKS: Final[tuple[str, ...]] = tuple(f'C{index}' for index in range(1, 9))

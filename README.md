@@ -45,12 +45,15 @@ certification_status = NOT_CERTIFIED
 | M2 | 実行・受理済み | 全14ゲート PASS、exact dense/armillary equivalence、`NOT_CERTIFIED` |
 | M3 | 受理済み・凍結 | 全18ゲート PASS、`CORE_REPRODUCED`、`NOT_CERTIFIED` |
 | M4 | 実装・実行完了、数学境界で停止 | 全18ゲート PASS、`M4_COMPLETE / BLOCKED_MATH / NOT_CERTIFIED` |
-| M5 | 未開始・進行不可 | M4 の missing deterministic bounds が解消するまで開始しない |
+| M5 | proof primitives 実装済み・Paperspace 実行可 | 凍結 M4 parent 検証、CPU suite、inventory。open bounds を 0 埋めしない |
 | M6 | 受理ゲートのみ・未実装 | M5 受理後の multi-step certificate と独立 final verifier |
 
 M3 report は独立レビュー済みで、[audit/m3_accepted_parent.json](audit/m3_accepted_parent.json) に
-M3→M4 の受理根拠を固定しました。M4 の実装ゲートは完了しましたが、error ledger に missing
-deterministic bounds が残るため `BLOCKED_MATH` です。M5 は開始しません。
+M3→M4 の受理根拠を固定しました。M4 の実装ゲートは完了し、derivative-only acceptance は
+[audit/m4_accepted_parent.json](audit/m4_accepted_parent.json) に固定されています。M5 は
+`notebooks/60_m5_one_step_certificate.ipynb` から実行できます。open deterministic bounds を
+ゼロとして `ONE_STEP_CERTIFIED` にはしません。独立再検証は
+`notebooks/61_m5_independent_verifier.ipynb` です。
 
 現在の完了 run は次です。いずれも外部永続ストレージ `/storage` に保存されています。
 
@@ -85,6 +88,12 @@ checkpoint: /storage/validated_4d_su2_rg/runs/M4-20260720T021737Z-b9c9514fed11/c
 report: /storage/validated_4d_su2_rg/runs/M4-20260720T021737Z-b9c9514fed11/reports/M4_report.json
 acceptance: /storage/validated_4d_su2_rg/runs/M4-20260720T021737Z-b9c9514fed11/reports/M4_acceptance.json
 certification status: NOT_CERTIFIED
+
+run ID: M5-20260720T051020Z-c3800fceaa80
+parent: M4-20260720T021737Z-b9c9514fed11
+entry: notebooks/60_m5_one_step_certificate.ipynb
+independent verifier: notebooks/61_m5_independent_verifier.ipynb
+status: proof primitives ready; open M4 handoff bounds retained (not zero-filled)
 ```
 
 M3 の実測要約：RTX A4000、FP64、rank 16、operator dimension 729、matrix-free/explicit

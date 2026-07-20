@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from src.common import atomic_write_json, read_json, sha256_file
 from src.m4_orchestrator import create_or_resume_m4
 from src.m4_status import m4_bound_handoff
 from tests.m4_helpers import make_synthetic_accepted_m3, passing_m4_test_report
+
+
+def _minimum_centered_fd_order(difference: dict) -> float:
+    channels = difference['channels']
+    minimum_order = math.inf
+    for channel in channels.values():
+        steps = channel['steps']
+        for earlier, later in zip(steps, steps[1:]):
+            earlier_h = float(earlier['step'])
+            later_h = float(later['step'])
+            earlier_e = float(earlier['relative_error_frobenius'])
+            later_e = float(later['relative_error_frobenius'])
+            order = math.log(later_e / earlier_e) / math.log(later_h / earlier_h)
+            minimum_order = min(minimum_order, order)
+    return float(minimum_order)
 
 
 def make_synthetic_accepted_m4(
@@ -19,7 +35,9 @@ def make_synthetic_accepted_m4(
         test_report=passing_m4_test_report(),
     )
     summary = orchestrator.run_until_checkpoint()
-    if summary.get('milestone_status') != 'DERIVATIVE_ACCEPTED':
+    # M4 runtime summary keeps enclosure milestone_status=BLOCKED_MATH while the
+    # derivative acceptance decision for M5 is recorded separately in the audit.
+    if summary.get('phase') != 'M4_COMPLETE' or summary.get('certification_status') != 'NOT_CERTIFIED':
         raise RuntimeError('Synthetic M4 derivative did not pass its gates.')
 
     run_root = persistent / 'runs' / run_id
@@ -60,8 +78,8 @@ def make_synthetic_accepted_m4(
                 'REPRODUCIBLE_REGRESSION_ACCEPTANCE_NOT_A_DETERMINISTIC_PROOF_BOUND'
             ),
             'all_channels_converged': True,
-            'minimum_observed_centered_fd_order': (
-                difference['minimum_observed_centered_fd_order']
+            'minimum_observed_centered_fd_order': _minimum_centered_fd_order(
+                difference
             ),
             'max_final_relative_error': difference['max_final_relative_error'],
             'zero_tangent_residual': sources['zero_source_max_abs'],

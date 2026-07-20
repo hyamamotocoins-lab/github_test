@@ -154,13 +154,20 @@ def _verify_regression(report: dict[str, Any]) -> dict[str, float]:
         raise M5ParentError('M4 source channel ordering/set changed.')
 
     pipeline = results.get('M4_DUAL_PIPELINE', {}).get('result', {})
+    backend = pipeline.get('backend') if isinstance(pipeline, dict) else None
+    cpu_backend = (
+        isinstance(backend, dict)
+        and backend.get('is_cuda') is False
+        and str(backend.get('device', '')).startswith('cpu')
+    )
+    tf32_ok = pipeline.get('tf32_disabled') is True or cpu_backend
     if not isinstance(pipeline, dict) or any((
         pipeline.get('status') != 'PASS',
         pipeline.get('contraction_rule') != 'PRODUCT_RULE_COMPLETE',
         pipeline.get('fixed_basis_projection') is not True,
         pipeline.get('basis_variation_policy')
         != 'FIXED_BASIS_WITH_EXPLICIT_LEDGER_TERM',
-        pipeline.get('tf32_disabled') is not True,
+        not tf32_ok,
     )):
         raise M5ParentError('M4 fixed-basis forward tangent evidence failed.')
 
