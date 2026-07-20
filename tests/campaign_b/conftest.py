@@ -47,13 +47,13 @@ time_budget:
   enforce_wall_clock: false
 inherit_deadline: false
 screening_margin: 0.000001
-stop_after_first_verified_q_lt_1: true
 parent_q_upper: 1.011045
 parent_rank: 16
-allow_generate_canonical: false
 shared_m2:
   allow_generate_canonical: false
-  on_missing: stop_campaign
+  on_missing: continue_archive
+never_stop: true
+stop_after_first_verified_q_lt_1: false
 execution_policy:
   staged_only: true
   minimum_j2: 2

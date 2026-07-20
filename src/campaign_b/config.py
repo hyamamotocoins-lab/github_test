@@ -152,10 +152,13 @@ class CampaignBConfig:
     emergency_flush_sec: float = EMERGENCY_FLUSH_SEC
     # Resume-first: do not hard-stop on the six-hour window unless explicitly on.
     enforce_wall_clock: bool = False
+    # Keep exploring unless the queue is exhausted (operational continuity).
+    never_stop: bool = True
     screening_margin: float = 1e-6
-    stop_after_first_verified_q_lt_1: bool = True
+    stop_after_first_verified_q_lt_1: bool = False
     allow_generate_canonical_m2: bool = False
-    on_missing_m2: str = 'stop_campaign'
+    # continue_archive | defer | stop_campaign
+    on_missing_m2: str = 'continue_archive'
     search_space: dict[str, Any] = field(default_factory=dict)
     search_space_path: Path | None = None
     parent_evidence: dict[str, Any] = field(default_factory=dict)
@@ -244,7 +247,7 @@ def load_campaign_b_config(path: Path) -> CampaignBConfig:
 
     shared_m2 = raw.get('shared_m2') or {}
     allow_gen = bool(shared_m2.get('allow_generate_canonical', False))
-    on_missing = str(shared_m2.get('on_missing', 'stop_campaign'))
+    on_missing = str(shared_m2.get('on_missing', 'continue_archive'))
 
     space_path = raw.get('search_space_path')
     if space_path:
@@ -282,9 +285,10 @@ def load_campaign_b_config(path: Path) -> CampaignBConfig:
                 raw.get('enforce_wall_clock', False),
             )
         ),
+        never_stop=bool(raw.get('never_stop', True)),
         screening_margin=float(raw.get('screening_margin', 1e-6)),
         stop_after_first_verified_q_lt_1=bool(
-            raw.get('stop_after_first_verified_q_lt_1', True)
+            raw.get('stop_after_first_verified_q_lt_1', False)
         ),
         allow_generate_canonical_m2=allow_gen,
         on_missing_m2=on_missing,

@@ -11,7 +11,7 @@ def test_campaign_transitions() -> None:
 
 def test_illegal_campaign_transition() -> None:
     try:
-        transition_campaign('COMPLETE', 'RUNNING')
+        transition_campaign('CREATED', 'COMPLETE')
         ok = False
     except CampaignFatalError:
         ok = True

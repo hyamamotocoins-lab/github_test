@@ -29,7 +29,9 @@ execution_policy:
   claim_scope: SCREENING_ONLY
 shared_m2:
   allow_generate_canonical: false
-  on_missing: stop_campaign
+  on_missing: continue_archive
+never_stop: true
+stop_after_first_verified_q_lt_1: false
 independent_verifier:
   q_atol: 1.0e-9
   q_rtol: 1.0e-6

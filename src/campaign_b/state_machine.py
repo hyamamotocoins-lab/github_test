@@ -9,7 +9,7 @@ from .schemas import CAMPAIGN_STATES, CANDIDATE_STATES
 
 
 CAMPAIGN_TRANSITIONS: dict[str, frozenset[str]] = {
-    'CREATED': frozenset({'PREFLIGHT', 'FAIL_CLOSED'}),
+    'CREATED': frozenset({'PREFLIGHT', 'FAIL_CLOSED', 'RUNNING'}),
     'PREFLIGHT': frozenset({'RUNNING', 'FAIL_CLOSED'}),
     'RUNNING': frozenset({
         'ADMISSION_CLOSED',
@@ -18,23 +18,29 @@ CAMPAIGN_TRANSITIONS: dict[str, frozenset[str]] = {
         'BLOCKED_NEED_CANONICAL_M2',
         'FAIL_CLOSED',
         'TIME_BUDGET_EXHAUSTED',
+        'PREFLIGHT',
     }),
     'ADMISSION_CLOSED': frozenset({
         'FINALIZING',
         'COMPLETE',
         'FAIL_CLOSED',
         'TIME_BUDGET_EXHAUSTED',
+        'RUNNING',
+        'PREFLIGHT',
     }),
     'FINALIZING': frozenset({
         'COMPLETE',
         'FAIL_CLOSED',
         'TIME_BUDGET_EXHAUSTED',
         'BLOCKED_NEED_CANONICAL_M2',
+        'RUNNING',
+        'PREFLIGHT',
     }),
-    'COMPLETE': frozenset(),
-    'BLOCKED_NEED_CANONICAL_M2': frozenset(),
-    'FAIL_CLOSED': frozenset(),
-    'TIME_BUDGET_EXHAUSTED': frozenset(),
+    # Resume always allowed from terminal states.
+    'COMPLETE': frozenset({'PREFLIGHT', 'RUNNING'}),
+    'BLOCKED_NEED_CANONICAL_M2': frozenset({'PREFLIGHT', 'RUNNING'}),
+    'FAIL_CLOSED': frozenset({'PREFLIGHT', 'RUNNING'}),
+    'TIME_BUDGET_EXHAUSTED': frozenset({'PREFLIGHT', 'RUNNING'}),
 }
 
 
@@ -46,14 +52,15 @@ CANDIDATE_TRANSITIONS: dict[str, frozenset[str]] = {
         'SCREENED_Q_LT_1',
         'BORDERLINE_Q',
         'ARCHIVED',
+        'PENDING',
     }),
     'SCREENED_Q_GE_1': frozenset({'ARCHIVED'}),
     'BORDERLINE_Q': frozenset({'ARCHIVED'}),
-    'SCREENED_Q_LT_1': frozenset({'M2_RESOLVE', 'ARCHIVED'}),
-    'M2_RESOLVE': frozenset({'READY_SHARED', 'NEED_CANONICAL_M2', 'ARCHIVED'}),
-    'NEED_CANONICAL_M2': frozenset({'ARCHIVED'}),
-    'READY_SHARED': frozenset({'S0', 'ARCHIVED'}),
-    'S0': frozenset({'INDEPENDENT_VERIFY', 'ARCHIVED'}),
+    'SCREENED_Q_LT_1': frozenset({'M2_RESOLVE', 'ARCHIVED', 'PENDING'}),
+    'M2_RESOLVE': frozenset({'READY_SHARED', 'NEED_CANONICAL_M2', 'ARCHIVED', 'PENDING'}),
+    'NEED_CANONICAL_M2': frozenset({'ARCHIVED', 'PENDING'}),
+    'READY_SHARED': frozenset({'S0', 'ARCHIVED', 'PENDING'}),
+    'S0': frozenset({'INDEPENDENT_VERIFY', 'ARCHIVED', 'PENDING'}),
     'INDEPENDENT_VERIFY': frozenset({
         'PACKAGE_AUDIT', 'VERIFY_REJECTED', 'ARCHIVED',
     }),
