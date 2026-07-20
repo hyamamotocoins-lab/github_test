@@ -20,6 +20,7 @@ from .common import (
 from .exact_arithmetic import fraction_decimal_text
 from .interval_kernel import construct
 from .m5_config import M5Config, default_m5_config
+from .m5_obligations import evaluate_all_obligations, write_obligation_report
 from .m5_package import (
     assemble_one_step_package,
     make_contractive_fixture_inputs,
@@ -308,20 +309,41 @@ class M5Orchestrator:
                 reports.mkdir(parents=True, exist_ok=True)
                 atomic_write_json(reports / 'M5_parent_artifact_inventory.json', inventory)
                 atomic_write_json(reports / 'M5_schema_mapping.json', mapping)
-                open_bounds = parent_info['bound_ledger']['open_for_M5']
-                # Proof primitives are present. Live storage still has open M4 handoff
-                # obligations; do not invent zero residuals or mark M5_COMPLETE.
-                if open_bounds:
-                    implementation_status = 'M5_PROOF_PRIMITIVES_READY'
-                    enclosure_status = PROOF_OBLIGATIONS_OPEN
-                    phase = 'M5_IN_PROGRESS'
-                    milestone_status = PROOF_OBLIGATIONS_OPEN
-                    certification_status = NOT_CERTIFIED
-                else:
-                    implementation_status = M5_BLOCKED_MATH
+
+                m4_checkpoint = (
+                    self.persistent_root / 'runs' / self.config.parent_m4_run_id
+                    / 'checkpoints' / 'ckpt_000014'
+                )
+                obligation_report = evaluate_all_obligations(
+                    self.project_root,
+                    self.persistent_root,
+                    m4_checkpoint=m4_checkpoint,
+                )
+                write_obligation_report(
+                    reports / 'M5_obligation_report.json', obligation_report,
+                )
+                parent_info['obligation_evaluation'] = {
+                    'closed_obligations': obligation_report['closed_obligations'],
+                    'open_obligations': obligation_report['open_obligations'],
+                    'all_closed': obligation_report['all_closed'],
+                }
+                # Never invent zero residuals. Package assembly / ONE_STEP_CERTIFIED
+                # requires more than handoff-obligation closure alone.
+                if obligation_report['all_closed']:
+                    implementation_status = 'M5_HANDOFF_OBLIGATIONS_CLOSED'
                     enclosure_status = M5_BLOCKED_MATH
                     phase = 'M5_IN_PROGRESS'
                     milestone_status = M5_BLOCKED_MATH
+                    certification_status = NOT_CERTIFIED
+                    parent_info['obligation_evaluation']['next_gate'] = (
+                        'Build influence-kernel z_min and one_step_certificate; '
+                        'handoff obligations alone do not imply ONE_STEP_CERTIFIED.'
+                    )
+                else:
+                    implementation_status = 'M5_OBLIGATION_EVALUATION_COMPLETE'
+                    enclosure_status = PROOF_OBLIGATIONS_OPEN
+                    phase = 'M5_IN_PROGRESS'
+                    milestone_status = PROOF_OBLIGATIONS_OPEN
                     certification_status = NOT_CERTIFIED
         except M5ParentError as exc:
             implementation_status = M5_VERIFICATION_FAILED
@@ -338,6 +360,11 @@ class M5Orchestrator:
             certification_status = NOT_CERTIFIED
             parent_info = {'error': str(exc)}
 
+        obligation_eval = (
+            parent_info.get('obligation_evaluation')
+            if isinstance(parent_info, dict)
+            else None
+        )
         verdict = (
             package_result['verdict']
             if package_result is not None
@@ -349,10 +376,20 @@ class M5Orchestrator:
                 'certification_status': certification_status,
                 'independent_verifier': 'NOT_RUN',
                 'open_for_M5': (
-                    parent_info.get('bound_ledger', {}).get('open_for_M5')
-                    if isinstance(parent_info, dict)
-                    else None
+                    obligation_eval.get('open_obligations')
+                    if isinstance(obligation_eval, dict)
+                    else (
+                        parent_info.get('bound_ledger', {}).get('open_for_M5')
+                        if isinstance(parent_info, dict)
+                        else None
+                    )
                 ),
+                'closed_for_M5': (
+                    obligation_eval.get('closed_obligations')
+                    if isinstance(obligation_eval, dict)
+                    else []
+                ),
+                'obligation_report': 'reports/M5_obligation_report.json',
             }
         )
         report = {
@@ -392,14 +429,24 @@ class M5Orchestrator:
             'environment': environment_info(),
             'generated_at': utc_now(),
         })
+        open_list = []
+        closed_list = []
+        if isinstance(obligation_eval, dict):
+            open_list = list(obligation_eval.get('open_obligations') or [])
+            closed_list = list(obligation_eval.get('closed_obligations') or [])
         atomic_write_text(
             self.run_root / 'next_session_plan.md',
             (
                 '# Next session plan\n\n'
                 '1. Keep M4 parent immutable.\n'
-                '2. Close open M5 proof obligations with deterministic residuals.\n'
-                '3. Rebuild one_step_certificate and rerun independent verifier.\n'
-                '4. Freeze only after independent_verifier=PASS.\n'
+                f'2. Closed handoff obligations ({len(closed_list)}): '
+                + ', '.join(closed_list) + '\n'
+                f'3. Still open ({len(open_list)}): '
+                + ', '.join(open_list) + '\n'
+                '4. See reports/M5_obligation_report.json for formulas and provenance.\n'
+                '5. After all handoff obligations are RIGOROUS, build influence-kernel '
+                'z_min and one_step_certificate; rerun 61_m5_independent_verifier.ipynb.\n'
+                '6. Freeze only after independent_verifier=PASS.\n'
             ),
         )
         return report

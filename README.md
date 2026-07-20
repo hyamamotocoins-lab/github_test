@@ -45,15 +45,36 @@ certification_status = NOT_CERTIFIED
 | M2 | 実行・受理済み | 全14ゲート PASS、exact dense/armillary equivalence、`NOT_CERTIFIED` |
 | M3 | 受理済み・凍結 | 全18ゲート PASS、`CORE_REPRODUCED`、`NOT_CERTIFIED` |
 | M4 | 実装・実行完了、数学境界で停止 | 全18ゲート PASS、`M4_COMPLETE / BLOCKED_MATH / NOT_CERTIFIED` |
-| M5 | proof primitives 実装済み・Paperspace 実行可 | 凍結 M4 parent 検証、CPU suite、inventory。open bounds を 0 埋めしない |
+| M5 | handoff obligation 評価まで実装・Paperspace 実行可 | 凍結 M4 parent 検証、CPU suite、8 義務の厳密評価。0 埋め禁止 |
 | M6 | 受理ゲートのみ・未実装 | M5 受理後の multi-step certificate と独立 final verifier |
 
 M3 report は独立レビュー済みで、[audit/m3_accepted_parent.json](audit/m3_accepted_parent.json) に
 M3→M4 の受理根拠を固定しました。M4 の実装ゲートは完了し、derivative-only acceptance は
-[audit/m4_accepted_parent.json](audit/m4_accepted_parent.json) に固定されています。M5 は
-`notebooks/60_m5_one_step_certificate.ipynb` から実行できます。open deterministic bounds を
-ゼロとして `ONE_STEP_CERTIFIED` にはしません。独立再検証は
-`notebooks/61_m5_independent_verifier.ipynb` です。
+[audit/m4_accepted_parent.json](audit/m4_accepted_parent.json) に固定されています。
+
+M5 は `notebooks/60_m5_one_step_certificate.ipynb` から実行します。実行後に
+
+```text
+reports/M5_obligation_report.json
+```
+
+へ 8 個の M4→M5 handoff obligations の評価が書かれます。現状の厳密閉鎖対象は次です。
+
+- GPU rounding / backward error（凍結 16×16 pipeline の CPU 再計算残差）
+- M3 RSVD projection residual（凍結 float64 演算子ブロック vs RSVD 因子の Fraction Frobenius）
+- basis variation residual（固定基底の明示 alias、projection residual と同一上界）
+- normalization / denominator error（凍結 center の Frobenius スケールが正であることの厳密確認）
+
+次はまだ `BLOCKED_MATH` のまま残します（0 埋めしない）。
+
+- cutoff and rank dependence
+- initial representation tail の 4D lift（2D M1 tail 自体は厳密だが、M4 ノルムへの持ち上げが未証明）
+- input radius propagation
+- omitted fusion and channel tail
+
+`ONE_STEP_CERTIFIED` / 完全な `one_step_certificate/` は、上記 open 項を閉じたあと
+influence-kernel `z_min` を構成し、`notebooks/61_m5_independent_verifier.ipynb` で再検証してから
+のみ freeze します。
 
 現在の完了 run は次です。いずれも外部永続ストレージ `/storage` に保存されています。
 
@@ -93,7 +114,8 @@ run ID: M5-20260720T051020Z-c3800fceaa80
 parent: M4-20260720T021737Z-b9c9514fed11
 entry: notebooks/60_m5_one_step_certificate.ipynb
 independent verifier: notebooks/61_m5_independent_verifier.ipynb
-status: proof primitives ready; open M4 handoff bounds retained (not zero-filled)
+obligation report: runs/.../reports/M5_obligation_report.json
+status: handoff obligations evaluated; remaining open bounds stay BLOCKED_MATH
 ```
 
 M3 の実測要約：RTX A4000、FP64、rank 16、operator dimension 729、matrix-free/explicit
