@@ -69,6 +69,8 @@ class RunState:
             self.assert_m2_safe()
         elif self.milestone == 'M3':
             self.assert_m3_safe()
+        elif self.milestone == 'M4':
+            self.assert_m4_safe()
         else:
             raise CheckpointError(f'Unsupported milestone in checkpoint state: {self.milestone!r}')
 
@@ -129,6 +131,18 @@ class RunState:
                 'M3 is an exploratory local pilot and may not claim RG progression.'
             )
         self._assert_bound_mapping('M3')
+
+    def assert_m4_safe(self) -> None:
+        self._assert_common_safe()
+        if self.milestone != 'M4':
+            raise CheckpointError('M4 assertion received a non-M4 state.')
+        if self.phase not in {'M4_BOOTSTRAP', 'M4_RUNNING', 'M4_COMPLETE'}:
+            raise CheckpointError(f'Phase {self.phase!r} is outside M4.')
+        if self.rg_step != 0 or self.direction or self.subphase:
+            raise CheckpointError(
+                'M4 defines derivative/error state but may not claim RG progression.'
+            )
+        self._assert_bound_mapping('M4')
 
     def _assert_bound_mapping(self, milestone: str) -> None:
         if not isinstance(self.bounds, dict) or any(
