@@ -241,3 +241,171 @@ def stop_staged_background_worker(package_root: Path) -> dict[str, Any]:
     except ProcessLookupError:
         return {'stopped': True, 'reason': 'already_dead', 'pid': pid}
     return {'stopped': True, 'pid': pid, 'signal': 'SIGTERM'}
+
+
+def kill_stray_staged_processes(
+    *,
+    package_root: Path | None = None,
+    include_execute_lineage: bool = True,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Kill leftover staged workers / execute_lineage processes."""
+    killed: list[dict[str, Any]] = []
+    sig = signal.SIGKILL if force else signal.SIGTERM
+
+    if package_root is not None:
+        stop = stop_staged_background_worker(package_root)
+        if stop.get('stopped'):
+            killed.append({'source': 'notebook_worker', **stop})
+
+    patterns = ['m7_staged', 'run_worker.py']
+    if include_execute_lineage:
+        patterns.append('execute_lineage.py')
+
+    try:
+        out = subprocess.check_output(['ps', 'ax', '-o', 'pid=,command='], text=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return {'killed': killed, 'error': str(exc)}
+
+    self_pid = os.getpid()
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        cmd = parts[1]
+        if pid == self_pid:
+            continue
+        if not any(pat in cmd for pat in patterns):
+            continue
+        if 'grep' in cmd:
+            continue
+        try:
+            os.kill(pid, sig)
+            killed.append({'pid': pid, 'cmd': cmd, 'signal': sig.name})
+        except ProcessLookupError:
+            killed.append({'pid': pid, 'cmd': cmd, 'already_dead': True})
+
+    # Clear stale pid file if process is gone.
+    if package_root is not None:
+        paths = worker_paths(package_root)
+        if paths['pid'].is_file():
+            try:
+                old = int(paths['pid'].read_text(encoding='utf-8').strip())
+            except ValueError:
+                old = None
+            if old is None or not is_pid_alive(old):
+                paths['pid'].unlink(missing_ok=True)
+
+    return {'killed': killed, 'force': force, 'at': utc_now()}
+
+
+def watch_staged_background_worker(
+    package_root: Path,
+    *,
+    persistent_root: Path,
+    project_root: Path | None = None,
+    test_report: dict[str, Any] | None = None,
+    poll_s: float = 30.0,
+    max_hours: float = 12.0,
+    auto_restart: bool = True,
+    split_batch_to: int = 1,
+    checkpoint_keep: int = 5,
+) -> dict[str, Any]:
+    """Poll until M2 complete, worker finished, or deadline.
+
+    If the worker dies without completion and auto_restart=True, relaunch.
+    Safe for notebook: only sleeps/polls in-kernel; heavy work stays detached.
+    """
+    if poll_s < 5.0:
+        raise M7StagedNotebookError('poll_s must be >= 5 seconds.')
+    deadline = time.monotonic() + max_hours * 3600.0
+    history: list[dict[str, Any]] = []
+    restarts = 0
+
+    while time.monotonic() < deadline:
+        snap = poll_staged_background_worker(
+            package_root, persistent_root=persistent_root,
+        )
+        prog = snap.get('progress') or {}
+        last = snap.get('last_status') or {}
+        summary = {
+            'at': snap.get('polled_at'),
+            'running': snap.get('running'),
+            'pid': snap.get('pid'),
+            'm2_complete': prog.get('m2_complete'),
+            'fraction_done': prog.get('fraction_done'),
+            'queue_counts': prog.get('queue_counts'),
+            'worker_state': last.get('state'),
+            'checkpoint_index': prog.get('checkpoint_index'),
+        }
+        history.append(summary)
+        print(json.dumps(summary, ensure_ascii=False, default=str), flush=True)
+
+        if prog.get('m2_complete'):
+            return {
+                'outcome': 'M2_COMPLETE',
+                'restarts': restarts,
+                'final': snap,
+                'history_tail': history[-20:],
+            }
+        if last.get('state') == 'finished' and prog.get('m2_complete'):
+            return {
+                'outcome': 'WORKER_FINISHED',
+                'restarts': restarts,
+                'final': snap,
+                'history_tail': history[-20:],
+            }
+        if last.get('state') == 'failed' and not snap.get('running'):
+            if auto_restart and project_root is not None:
+                restarts += 1
+                print(f'worker failed; auto_restart #{restarts}', flush=True)
+                start_staged_background_worker(
+                    package_root,
+                    project_root=project_root,
+                    persistent_root=persistent_root,
+                    test_report=test_report,
+                    split_batch_to=split_batch_to,
+                    checkpoint_keep=checkpoint_keep,
+                )
+            else:
+                return {
+                    'outcome': 'WORKER_FAILED',
+                    'restarts': restarts,
+                    'final': snap,
+                    'history_tail': history[-20:],
+                }
+        elif (
+            not snap.get('running')
+            and not prog.get('m2_complete')
+            and auto_restart
+            and project_root is not None
+        ):
+            # Dead worker, no finished status (killed externally).
+            restarts += 1
+            print(f'worker dead; auto_restart #{restarts}', flush=True)
+            start_staged_background_worker(
+                package_root,
+                project_root=project_root,
+                persistent_root=persistent_root,
+                test_report=test_report,
+                split_batch_to=split_batch_to,
+                checkpoint_keep=checkpoint_keep,
+            )
+
+        time.sleep(poll_s)
+
+    return {
+        'outcome': 'TIMEOUT',
+        'restarts': restarts,
+        'final': poll_staged_background_worker(
+            package_root, persistent_root=persistent_root,
+        ),
+        'history_tail': history[-20:],
+    }
