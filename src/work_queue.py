@@ -166,6 +166,23 @@ class WorkQueue:
                 repaired.append(item.item_id)
         return repaired
 
+    def reopen_phases(self, phases: tuple[str, ...] | list[str]) -> list[str]:
+        """Force listed phases back to pending (e.g. after controller code drift)."""
+        wanted = set(phases)
+        repaired: list[str] = []
+        for item in self.items.values():
+            if item.phase not in wanted:
+                continue
+            if item.status == 'pending' and item.attempts == 0 and not item.result_relpath:
+                continue
+            item.status = 'pending'
+            item.attempts = 0
+            item.result_relpath = None
+            item.result_sha256 = None
+            item.last_error = None
+            repaired.append(item.item_id)
+        return repaired
+
     def to_payload(self) -> dict[str, Any]:
         return {
             'items': {key: asdict(value) for key, value in sorted(self.items.items())},
