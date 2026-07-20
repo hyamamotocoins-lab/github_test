@@ -21,16 +21,56 @@ class M7AutoExecuteError(RuntimeError):
 
 def select_best_lineage_candidate(
     ranking: list[dict[str, Any]] | dict[str, Any],
+    *,
+    max_executable_j2_max: int = 2,
+    prefer_executable: bool = True,
 ) -> dict[str, Any]:
+    """Pick a Campaign C candidate for automation.
+
+    Default policy: among resource-executable schemes (exact-M2 auto budget),
+    choose lowest estimated q. If none are executable, fall back to global
+    lowest-q (will materialize as RESOURCE_GATED).
+    """
     rows = ranking.get('ranking') if isinstance(ranking, dict) else ranking
     if not isinstance(rows, list) or not rows:
         raise M7AutoExecuteError('No ranking rows available for auto-select.')
-    def key(row: dict[str, Any]) -> float:
+
+    def est_q(row: dict[str, Any]) -> float:
         try:
             return float(row.get('q_cert_upper') or 1e9)
         except (TypeError, ValueError):
             return 1e9
-    return min(rows, key=key)
+
+    def j2_of(row: dict[str, Any]) -> int:
+        scheme = row.get('scheme') or {}
+        try:
+            return int(scheme.get('j2_max', 1))
+        except (TypeError, ValueError):
+            return 1
+
+    def is_executable(row: dict[str, Any]) -> bool:
+        return bool(
+            resource_gate(
+                j2_of(row),
+                max_executable_j2_max=max_executable_j2_max,
+            ).get('executable')
+        )
+
+    screening_best = min(rows, key=est_q)
+    if prefer_executable:
+        executable_rows = [row for row in rows if is_executable(row)]
+        if executable_rows:
+            chosen = min(executable_rows, key=est_q)
+            chosen = dict(chosen)
+            chosen['selection_policy'] = 'prefer_executable_lowest_q'
+            chosen['screening_best_candidate_id'] = screening_best.get('candidate_id')
+            chosen['screening_best_q'] = screening_best.get('q_cert_upper')
+            return chosen
+    chosen = dict(screening_best)
+    chosen['selection_policy'] = 'global_lowest_q_resource_gated'
+    chosen['screening_best_candidate_id'] = screening_best.get('candidate_id')
+    chosen['screening_best_q'] = screening_best.get('q_cert_upper')
+    return chosen
 
 
 def write_human_review_approval(
@@ -244,7 +284,11 @@ def run_campaign_c_automation(
     if not ranking_path.is_file():
         raise M7AutoExecuteError(f'Missing ranking: {ranking_path}')
     ranking = read_json(ranking_path)
-    best = select_best_lineage_candidate(ranking)
+    best = select_best_lineage_candidate(
+        ranking,
+        max_executable_j2_max=max_executable_j2_max,
+        prefer_executable=True,
+    )
     scheme = best.get('scheme') or {}
     candidate_id = str(best.get('candidate_id'))
 
@@ -283,17 +327,53 @@ def run_campaign_c_automation(
     if review.get('status') != 'APPROVED':
         raise M7AutoExecuteError('HUMAN_REVIEW.json is not APPROVED.')
 
-    # Prefer reviewed candidate if present.
-    reviewed_id = review.get('candidate_id') or candidate_id
-    if reviewed_id != candidate_id:
-        # Find reviewed row if available.
+    # Reviewed candidate is archival unless it is itself executable (or pinned).
+    reviewed_id = str(review.get('candidate_id') or '')
+    force_pin = bool(review.get('force_pin_candidate'))
+    if reviewed_id and reviewed_id != candidate_id:
         rows = ranking.get('ranking') if isinstance(ranking, dict) else ranking
-        for row in rows or []:
-            if row.get('candidate_id') == reviewed_id:
-                best = row
+        reviewed_row = next(
+            (row for row in (rows or []) if row.get('candidate_id') == reviewed_id),
+            None,
+        )
+        if reviewed_row is not None:
+            reviewed_j2 = int((reviewed_row.get('scheme') or {}).get('j2_max', 1))
+            reviewed_exec = bool(
+                resource_gate(
+                    reviewed_j2,
+                    max_executable_j2_max=max_executable_j2_max,
+                ).get('executable')
+            )
+            if force_pin or reviewed_exec:
+                best = dict(reviewed_row)
+                best['selection_policy'] = (
+                    'force_pin_review' if force_pin else 'reviewed_executable'
+                )
                 scheme = best.get('scheme') or scheme
                 candidate_id = reviewed_id
-                break
+            else:
+                # Keep executable primary; archive reviewed screening pick later.
+                best = dict(best)
+                best['selection_policy'] = 'prefer_executable_over_gated_review'
+                best['review_candidate_id_archived'] = reviewed_id
+                # Ensure screening_best points at the gated review pick.
+                best['screening_best_candidate_id'] = reviewed_id
+                best['screening_best_q'] = reviewed_row.get('q_cert_upper')
+
+    # Refresh approval to match the primary executable selection when we overrode.
+    if str(review.get('candidate_id')) != candidate_id and not force_pin:
+        write_human_review_approval(
+            search_root,
+            candidate_id=candidate_id,
+            scheme=scheme if isinstance(scheme, dict) else {},
+            reviewer=str(review.get('reviewer') or 'config.human_review_approved'),
+            notes=(
+                'Primary approval retargeted to resource-executable candidate; '
+                f"previous gated review {reviewed_id or 'n/a'} archived."
+            ),
+            auto=False,
+        )
+        review = load_human_review(search_root) or review
 
     manifest = materialize_s3_lineage_package(
         search_root,
@@ -310,6 +390,29 @@ def run_campaign_c_automation(
     package_root = Path(manifest['package_root'])
     dry = dry_run_lineage_package(package_root)
 
+    # Also materialize the absolute screening-best when it differs (for archive).
+    screening_id = best.get('screening_best_candidate_id')
+    if (
+        screening_id
+        and screening_id != candidate_id
+        and isinstance(ranking, dict)
+    ):
+        for row in ranking.get('ranking') or []:
+            if row.get('candidate_id') == screening_id:
+                materialize_s3_lineage_package(
+                    search_root,
+                    {
+                        'candidate_id': screening_id,
+                        'scheme_hash': row.get('scheme_hash'),
+                        'scheme': row.get('scheme') or {},
+                    },
+                    parent_m6_run_id=parent_m6_run_id,
+                    search_run_id=search_run_id,
+                    parent_j2_max=parent_j2_max,
+                    max_executable_j2_max=max_executable_j2_max,
+                )
+                break
+
     status = (
         'READY_FOR_LIVE_EXECUTE'
         if dry.get('live_execute_allowed')
@@ -319,6 +422,9 @@ def run_campaign_c_automation(
         'schema_version': 1,
         'status': status,
         'best': best,
+        'selection_policy': best.get('selection_policy'),
+        'screening_best_candidate_id': best.get('screening_best_candidate_id'),
+        'screening_best_q': best.get('screening_best_q'),
         'review': {
             'candidate_id': review.get('candidate_id'),
             'reviewer': review.get('reviewer'),
@@ -329,6 +435,8 @@ def run_campaign_c_automation(
         'generated_at': utc_now(),
         'notes': (
             'Automation completed materialize+dry_run. '
+            'Selection prefers resource-executable candidates when available; '
+            'screening-best (possibly gated) is archived alongside. '
             'Live M2→M6 GPU execute remains operator-triggered via '
             'execute_lineage.py when resource_gate.executable is true.'
         ),

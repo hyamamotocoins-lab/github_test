@@ -73,6 +73,27 @@ def test_campaign_c_auto_materialize_and_dry_run(tmp_path: Path) -> None:
     assert (package / 'dry_run_report.json').is_file()
 
 
+def test_select_best_prefers_executable_over_lower_gated_q() -> None:
+    ranking = {
+        'ranking': [
+            {
+                'candidate_id': 'CAND-gated',
+                'q_cert_upper': '0.81',
+                'scheme': {'change_class': 'S3', 'j2_max': 4},
+            },
+            {
+                'candidate_id': 'CAND-exec',
+                'q_cert_upper': '1.9',
+                'scheme': {'change_class': 'S3', 'j2_max': 1},
+            },
+        ]
+    }
+    best = select_best_lineage_candidate(ranking, max_executable_j2_max=2)
+    assert best['candidate_id'] == 'CAND-exec'
+    assert best['selection_policy'] == 'prefer_executable_lowest_q'
+    assert best['screening_best_candidate_id'] == 'CAND-gated'
+
+
 def test_select_best_and_manual_materialize(tmp_path: Path) -> None:
     ranking = {
         'ranking': [
@@ -82,7 +103,7 @@ def test_select_best_and_manual_materialize(tmp_path: Path) -> None:
                 'scheme_hash': 'sha256:a',
                 'scheme': {
                     'change_class': 'S3',
-                    'j2_max': 2,
+                    'j2_max': 1,
                     'channel_policy': 'complete_at_cutoff',
                     'block_geometry': 'current',
                 },
@@ -100,13 +121,15 @@ def test_select_best_and_manual_materialize(tmp_path: Path) -> None:
             },
         ]
     }
-    best = select_best_lineage_candidate(ranking)
-    assert best['candidate_id'] == 'CAND-0'
+    best = select_best_lineage_candidate(ranking, max_executable_j2_max=2)
+    assert best['candidate_id'] == 'CAND-1'
     root = tmp_path / 'search'
     (root / 'reports').mkdir(parents=True)
     atomic_write_json(root / 'reports' / 'candidate_ranking.json', ranking)
+    # Prior gated review should be overridden by executable policy.
     write_human_review_approval(
-        root, candidate_id='CAND-0', scheme=best['scheme'], reviewer='test',
+        root, candidate_id='CAND-0', scheme=ranking['ranking'][1]['scheme'],
+        reviewer='test',
     )
     summary = run_campaign_c_automation(
         root,
@@ -115,7 +138,8 @@ def test_select_best_and_manual_materialize(tmp_path: Path) -> None:
         human_review_approved=True,
         max_executable_j2_max=2,
     )
-    assert summary['status'] == 'MATERIALIZED_RESOURCE_GATED'
+    assert summary['status'] == 'READY_FOR_LIVE_EXECUTE'
+    assert summary['best']['candidate_id'] == 'CAND-1'
     dry = dry_run_lineage_package(Path(summary['package']['package_root']))
     assert dry['status'] == 'PASS'
-    assert dry['live_execute_allowed'] is False
+    assert dry['live_execute_allowed'] is True
