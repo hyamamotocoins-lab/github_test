@@ -16,6 +16,7 @@ __all__ = [
     'load_campaign_b_config',
     'run_campaign_b',
     'run_mass_explore',
+    'run_advance_selected',
 ]
 
 
@@ -32,4 +33,7 @@ def __getattr__(name: str):
     if name == 'run_mass_explore':
         from .mass_explore import run_mass_explore
         return run_mass_explore
+    if name == 'run_advance_selected':
+        from .advance_selected import run_advance_selected
+        return run_advance_selected
     raise AttributeError(name)
