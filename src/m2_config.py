@@ -31,6 +31,7 @@ class M2Config:
     parent_audit_path: str = 'audit/m1_accepted_parent.json'
     j2_max: int = 1
     leg_count: int = 6
+    sector_batch_size: int = 0  # 0 → all sectors in one item (j2_max=1 default)
     orientations: tuple[int, ...] = (1, -1, 1, -1, 1, -1)
     seed: int = 20260720
     exact_decimal_digits: int = 80
@@ -66,7 +67,8 @@ class M2Config:
         if Path(self.parent_audit_path).as_posix() != 'audit/m1_accepted_parent.json':
             raise ValueError('M2 audit path is fixed and may not be silently changed.')
         integer_fields = (
-            self.j2_max, self.leg_count, self.seed, self.exact_decimal_digits,
+            self.j2_max, self.leg_count, self.sector_batch_size, self.seed,
+            self.exact_decimal_digits,
             self.tensor_shard_bytes, self.max_item_attempts,
         ) + self.orientations
         if any(
@@ -78,6 +80,13 @@ class M2Config:
             raise ValueError(
                 'M2 requires leg_count=6 and j2_max in [1, 4] '
                 '(higher cutoffs need a new governing-document revision).'
+            )
+        if self.sector_batch_size < 0:
+            raise ValueError('M2 sector_batch_size must be nonnegative.')
+        if self.j2_max > 1 and self.sector_batch_size == 0:
+            # Fail closed: higher cutoffs must opt into sector batching.
+            raise ValueError(
+                'M2 j2_max>1 requires sector_batch_size>=1 for staged execution.'
             )
         if self.orientations != (1, -1, 1, -1, 1, -1):
             raise ValueError('M2 fixed link orientation convention changed.')

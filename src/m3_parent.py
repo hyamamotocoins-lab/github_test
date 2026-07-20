@@ -81,13 +81,21 @@ def _verify_queue(checkpoint: Path, config: M3Config) -> WorkQueue:
     if not isinstance(state, dict) or any((
         state.get('run_id') != config.parent_run_id,
         state.get('phase') != 'M2_COMPLETE',
-        state.get('checkpoint_index') != 14,
         state.get('certification_status') != 'NOT_CERTIFIED',
     )):
         raise M3ParentError('Accepted M2 checkpoint state is invalid.')
+    if not isinstance(state.get('checkpoint_index'), int) or state['checkpoint_index'] < 1:
+        raise M3ParentError('Accepted M2 checkpoint index is invalid.')
     queue = WorkQueue.from_payload(read_json(checkpoint / 'work_queue.json'))
-    if len(queue.items) != 6 or any(item.status != 'done' for item in queue.items.values()):
+    if not queue.items or any(item.status != 'done' for item in queue.items.values()):
         raise M3ParentError('Accepted M2 work queue is not complete.')
+    required = {
+        'M2_WIGNER_CACHE', 'M2_DENSE_REFERENCE', 'M2_ARMILLARY',
+        'M2_EQUIVALENCE', 'M2_SYMMETRY', 'M2_REPORT',
+    }
+    phases = {item.phase for item in queue.items.values()}
+    if not required.issubset(phases):
+        raise M3ParentError('Accepted M2 work queue is missing required phases.')
     run_root = checkpoint.parents[1]
     for item in queue.items.values():
         if not item.result_relpath or not item.result_sha256:
@@ -110,22 +118,36 @@ def _verify_queue(checkpoint: Path, config: M3Config) -> WorkQueue:
     return queue
 
 
-def _load_and_crosscheck_tensors(checkpoint: Path) -> dict[str, np.ndarray]:
+def _load_and_crosscheck_tensors(
+    checkpoint: Path, *, j2_max: int = 1,
+) -> dict[str, np.ndarray]:
+    from .cutoff_dims import sector_count as expected_sector_count
+
     loaded = TensorShardStore(16 * 1024 * 1024).load(checkpoint / 'tensors')
-    expected = checkpoint_tensor_shards(
-        build_armillary_sector(key) for key in all_link_star_keys()
-    )
-    if set(loaded) != set(expected) or len(loaded) != 64:
+    expected_keys = {
+        f"projector_{''.join(str(v) for v in key.representations)}"
+        for key in all_link_star_keys(j2_max)
+    }
+    if set(loaded) != expected_keys or len(loaded) != expected_sector_count(j2_max):
         raise M3ParentError('Accepted M2 projector tensor set changed.')
-    result: dict[str, np.ndarray] = {}
-    for name in sorted(expected):
-        actual = np.asarray(loaded[name], dtype=np.float64)
-        if not np.array_equal(actual, expected[name]):
-            raise M3ParentError(
-                f'Accepted M2 float tensor disagrees with exact reconstruction: {name}'
-            )
-        result[name] = actual.copy()
-    return result
+    # Exact SymPy rebuild cross-check is affordable only at j2_max=1.
+    if j2_max == 1:
+        expected = checkpoint_tensor_shards(
+            build_armillary_sector(key) for key in all_link_star_keys(1)
+        )
+        result: dict[str, np.ndarray] = {}
+        for name in sorted(expected):
+            actual = np.asarray(loaded[name], dtype=np.float64)
+            if not np.array_equal(actual, expected[name]):
+                raise M3ParentError(
+                    f'Accepted M2 float tensor disagrees with exact reconstruction: {name}'
+                )
+            result[name] = actual.copy()
+        return result
+    return {
+        name: np.asarray(loaded[name], dtype=np.float64).copy()
+        for name in sorted(loaded)
+    }
 
 
 def verify_accepted_m2_parent(
@@ -140,7 +162,6 @@ def verify_accepted_m2_parent(
         'accepted_for_next_milestone': 'M3',
         'accepted_phase': 'M2_COMPLETE',
         'accepted_run_id': config.parent_run_id,
-        'checkpoint_index': 14,
         'decision': 'ACCEPT_M2_FOR_M3_EXPLORATORY_IMPLEMENTATION',
         'certification_status': 'NOT_CERTIFIED',
         'independent_artifact_reload_performed': True,
@@ -149,19 +170,26 @@ def verify_accepted_m2_parent(
         audit.get(key) != value for key, value in expected_audit.items()
     ):
         raise M3ParentError('M2 acceptance audit identity or decision is invalid.')
+    if (
+        not isinstance(audit.get('checkpoint_index'), int)
+        or audit['checkpoint_index'] < 1
+    ):
+        raise M3ParentError('M2 acceptance audit checkpoint index is invalid.')
 
     report_path = Path(config.parent_report_path).resolve()
     acceptance_path = Path(config.parent_acceptance_path).resolve()
     checkpoint = Path(config.parent_checkpoint_path).resolve()
     manifest_path = checkpoint.parents[1] / 'run_manifest.json'
-    for key, path in {
+    path_keys = {
         'm2_report_path': report_path,
         'm2_acceptance_path': acceptance_path,
         'checkpoint_path': checkpoint,
-        'manifest_path': manifest_path,
-    }.items():
+    }
+    if 'manifest_path' in audit:
+        path_keys['manifest_path'] = manifest_path
+    for key, path_value in path_keys.items():
         audited = audit.get(key)
-        if not isinstance(audited, str) or Path(audited).resolve() != path:
+        if not isinstance(audited, str) or Path(audited).resolve() != path_value:
             raise M3ParentError(f'Accepted M2 path changed: {key}')
     if checkpoint.name != config.parent_checkpoint:
         raise M3ParentError('Accepted M2 checkpoint name changed.')
@@ -180,6 +208,15 @@ def verify_accepted_m2_parent(
     if checkpoint_hash != audit.get('checkpoint_hash_manifest_sha256'):
         raise M3ParentError('Accepted M2 checkpoint hash manifest changed.')
     queue = _verify_queue(checkpoint, config)
+    state = read_json(checkpoint / 'state.json')
+    if (
+        not isinstance(state, dict)
+        or state.get('checkpoint_index') != audit.get('checkpoint_index')
+    ):
+        raise M3ParentError('Accepted M2 checkpoint index disagrees with audit.')
+
+    from .cutoff_dims import expected_m2_gate_counts
+    from .m2_batching import proof_artifact_hash_map
 
     report = read_json(report_path)
     if not isinstance(report, dict) or any((
@@ -191,15 +228,16 @@ def verify_accepted_m2_parent(
         report.get('proof_artifact_hashes') != audit.get('proof_artifact_hashes'),
     )):
         raise M3ParentError('Accepted M2 report no longer satisfies every gate.')
-    if report.get('proof_artifact_hashes') != {
-        item.phase: item.result_sha256 for item in queue.items.values()
-    }:
+    if report.get('proof_artifact_hashes') != proof_artifact_hash_map(
+        queue.items.values(),
+    ):
         raise M3ParentError('Accepted M2 report hashes differ from its queue.')
+    expected_counts = expected_m2_gate_counts(config.j2_max)
     equivalence = (
         report.get('results', {}).get('M2_EQUIVALENCE', {}).get('result', {})
     )
     if (
-        equivalence.get('exact_match_count') != 64
+        equivalence.get('exact_match_count') != expected_counts['exact_match_count']
         or equivalence.get('mismatches') != []
     ):
         raise M3ParentError('Accepted M2 exact equivalence result changed.')
@@ -221,7 +259,7 @@ def verify_accepted_m2_parent(
     )):
         raise M3ParentError('Accepted M2 manifest identity changed.')
 
-    tensors = _load_and_crosscheck_tensors(checkpoint)
+    tensors = _load_and_crosscheck_tensors(checkpoint, j2_max=config.j2_max)
     return M3ParentEvidence({
         'm2_audit_sha256': sha256_file(audit_path),
         'm2_report_sha256': report_hash,

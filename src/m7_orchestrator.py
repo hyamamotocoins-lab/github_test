@@ -849,6 +849,7 @@ class M7Orchestrator:
                     human_review_approved=self.config.human_review_approved,
                     auto_approve=self.config.auto_approve_for_materialize,
                     max_executable_j2_max=self.config.max_executable_j2_max,
+                    max_staged_j2_max=self.config.max_staged_j2_max,
                     parent_j2_max=self.config.parent_j2_max,
                 )
                 atomic_write_json(reports / 'auto_execute_summary.json', auto_summary)

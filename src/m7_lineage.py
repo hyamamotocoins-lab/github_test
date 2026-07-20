@@ -286,7 +286,9 @@ def build_s3_lineage_plan(
         'execution_steps': [
             'HUMAN REVIEW or lineage_mode=auto approval stamp',
             'm7_auto_execute.materialize_s3_lineage_package + dry_run',
-            'If resource_gate.executable: create_or_resume_m2 with j2_max',
+            'If resource_gate.executable: instant create_or_resume_m2',
+            'If resource_gate.staged_executable: m7_staged_lineage '
+            'sector-batched M2 (resume across sessions)',
             'ACCEPT M2 → rewrite audit/m2_accepted_parent.json',
             'create_or_resume_m3 with derived sector_count/operator_dimension',
             'ACCEPT M3 → M4 → M5 → M6 child lineage (non-paperspace run IDs)',
@@ -294,8 +296,9 @@ def build_s3_lineage_plan(
         ],
         'notes': (
             'S3 requires a new M2→M6 lineage under LOCK. '
-            'Configs now accept j2_max in [1,4] with derived dims; '
-            'live execute is still resource-gated (exact M2 auto only j2_max=1). '
+            'Configs accept j2_max in [1,4] with derived dims; '
+            'j2=1: instant live; j2=2: staged sector-batched M2 '
+            '(execute_lineage.py --live --staged); higher cutoffs gated. '
             'q_cert>=1 on the child remains certificate failure only.'
         ),
         'generated_at': utc_now(),

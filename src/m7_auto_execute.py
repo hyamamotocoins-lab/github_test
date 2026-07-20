@@ -23,13 +23,17 @@ def select_best_lineage_candidate(
     ranking: list[dict[str, Any]] | dict[str, Any],
     *,
     max_executable_j2_max: int = 2,
+    max_staged_j2_max: int = 2,
     prefer_executable: bool = True,
+    prefer_staged_for_q_lt_1: bool = True,
 ) -> dict[str, Any]:
     """Pick a Campaign C candidate for automation.
 
-    Default policy: among resource-executable schemes (exact-M2 auto budget),
-    choose lowest estimated q. If none are executable, fall back to global
-    lowest-q (will materialize as RESOURCE_GATED).
+    Default policy:
+    1. If prefer_staged_for_q_lt_1: among staged_executable with estimated
+       q<1, choose lowest q (q<1 hunt via j2>=2 staged M2).
+    2. Else among instant-executable OR staged_executable, choose lowest q.
+    3. Else fall back to global lowest-q (RESOURCE_GATED archive).
     """
     rows = ranking.get('ranking') if isinstance(ranking, dict) else ranking
     if not isinstance(rows, list) or not rows:
@@ -48,21 +52,43 @@ def select_best_lineage_candidate(
         except (TypeError, ValueError):
             return 1
 
-    def is_executable(row: dict[str, Any]) -> bool:
-        return bool(
-            resource_gate(
-                j2_of(row),
-                max_executable_j2_max=max_executable_j2_max,
-            ).get('executable')
+    def gate_of(row: dict[str, Any]) -> dict[str, Any]:
+        return resource_gate(
+            j2_of(row),
+            max_executable_j2_max=max_executable_j2_max,
+            max_staged_j2_max=max_staged_j2_max,
         )
 
+    def is_executable(row: dict[str, Any]) -> bool:
+        return bool(gate_of(row).get('executable'))
+
+    def is_staged(row: dict[str, Any]) -> bool:
+        return bool(gate_of(row).get('staged_executable'))
+
+    def is_live_capable(row: dict[str, Any]) -> bool:
+        return is_executable(row) or is_staged(row)
+
     screening_best = min(rows, key=est_q)
+    if prefer_staged_for_q_lt_1:
+        staged_lt1 = [
+            row for row in rows if is_staged(row) and est_q(row) < 1.0
+        ]
+        if staged_lt1:
+            chosen = dict(min(staged_lt1, key=est_q))
+            chosen['selection_policy'] = 'prefer_staged_q_lt_1'
+            chosen['screening_best_candidate_id'] = screening_best.get('candidate_id')
+            chosen['screening_best_q'] = screening_best.get('q_cert_upper')
+            return chosen
     if prefer_executable:
-        executable_rows = [row for row in rows if is_executable(row)]
-        if executable_rows:
-            chosen = min(executable_rows, key=est_q)
-            chosen = dict(chosen)
-            chosen['selection_policy'] = 'prefer_executable_lowest_q'
+        live_rows = [row for row in rows if is_live_capable(row)]
+        if live_rows:
+            chosen = dict(min(live_rows, key=est_q))
+            policy = (
+                'prefer_staged_lowest_q'
+                if is_staged(chosen) and not is_executable(chosen)
+                else 'prefer_executable_lowest_q'
+            )
+            chosen['selection_policy'] = policy
             chosen['screening_best_candidate_id'] = screening_best.get('candidate_id')
             chosen['screening_best_q'] = screening_best.get('q_cert_upper')
             return chosen
@@ -120,13 +146,18 @@ def materialize_s3_lineage_package(
     search_run_id: str,
     parent_j2_max: int = 1,
     max_executable_j2_max: int = 2,
+    max_staged_j2_max: int = 2,
 ) -> dict[str, Any]:
     """Write an executable workspace for one S3 candidate."""
     scheme = candidate.get('scheme') or {}
     if scheme.get('change_class') != 'S3':
         raise M7AutoExecuteError('Auto-execute currently supports S3 candidates only.')
     j2_max = int(scheme.get('j2_max', parent_j2_max))
-    gate = resource_gate(j2_max, max_executable_j2_max=max_executable_j2_max)
+    gate = resource_gate(
+        j2_max,
+        max_executable_j2_max=max_executable_j2_max,
+        max_staged_j2_max=max_staged_j2_max,
+    )
     plan = build_s3_lineage_plan(
         {
             'candidate_id': candidate.get('candidate_id'),
@@ -210,8 +241,13 @@ def dry_run_lineage_package(package_root: Path) -> dict[str, Any]:
     checks: dict[str, Any] = {'j2_max': j2_max}
 
     # M2Config construction with requested cutoff.
-    m2 = M2Config(j2_max=j2_max)
-    checks['m2_config'] = {'status': 'PASS', 'j2_max': m2.j2_max}
+    batch = 0 if j2_max <= 1 else int(gate.get('default_sector_batch_size') or 16)
+    m2 = M2Config(j2_max=j2_max, sector_batch_size=batch)
+    checks['m2_config'] = {
+        'status': 'PASS',
+        'j2_max': m2.j2_max,
+        'sector_batch_size': m2.sector_batch_size,
+    }
 
     m3_base = asdict(M3Config())
     m3_base.update({
@@ -256,12 +292,14 @@ def dry_run_lineage_package(package_root: Path) -> dict[str, Any]:
         'status': 'PASS',
         'dry_run': True,
         'live_execute_allowed': bool(gate.get('executable')),
+        'staged_live_execute_allowed': bool(gate.get('staged_executable')),
         'resource_gate': gate,
         'checks': checks,
         'generated_at': utc_now(),
         'notes': (
             'Dry-run validates config construction and key counts only. '
-            'It does not run M2 SymPy/GPU lineage or emit CERTIFIED.'
+            'It does not run M2 SymPy/GPU lineage or emit CERTIFIED. '
+            'j2_max>=2 uses execute_lineage.py --live --staged.'
         ),
     }
     atomic_write_json(root / 'dry_run_report.json', report)
@@ -276,6 +314,7 @@ def run_campaign_c_automation(
     human_review_approved: bool = False,
     auto_approve: bool = False,
     max_executable_j2_max: int = 2,
+    max_staged_j2_max: int = 2,
     parent_j2_max: int = 1,
 ) -> dict[str, Any]:
     """End-to-end automation after Campaign C plan_only search."""
@@ -287,6 +326,7 @@ def run_campaign_c_automation(
     best = select_best_lineage_candidate(
         ranking,
         max_executable_j2_max=max_executable_j2_max,
+        max_staged_j2_max=max_staged_j2_max,
         prefer_executable=True,
     )
     scheme = best.get('scheme') or {}
@@ -338,23 +378,26 @@ def run_campaign_c_automation(
         )
         if reviewed_row is not None:
             reviewed_j2 = int((reviewed_row.get('scheme') or {}).get('j2_max', 1))
+            reviewed_gate = resource_gate(
+                reviewed_j2,
+                max_executable_j2_max=max_executable_j2_max,
+                max_staged_j2_max=max_staged_j2_max,
+            )
             reviewed_exec = bool(
-                resource_gate(
-                    reviewed_j2,
-                    max_executable_j2_max=max_executable_j2_max,
-                ).get('executable')
+                reviewed_gate.get('executable')
+                or reviewed_gate.get('staged_executable')
             )
             if force_pin or reviewed_exec:
                 best = dict(reviewed_row)
                 best['selection_policy'] = (
-                    'force_pin_review' if force_pin else 'reviewed_executable'
+                    'force_pin_review' if force_pin else 'reviewed_live_capable'
                 )
                 scheme = best.get('scheme') or scheme
                 candidate_id = reviewed_id
             else:
-                # Keep executable primary; archive reviewed screening pick later.
+                # Keep live-capable primary; archive reviewed screening pick later.
                 best = dict(best)
-                best['selection_policy'] = 'prefer_executable_over_gated_review'
+                best['selection_policy'] = 'prefer_live_capable_over_gated_review'
                 best['review_candidate_id_archived'] = reviewed_id
                 # Ensure screening_best points at the gated review pick.
                 best['screening_best_candidate_id'] = reviewed_id
@@ -368,7 +411,7 @@ def run_campaign_c_automation(
             scheme=scheme if isinstance(scheme, dict) else {},
             reviewer=str(review.get('reviewer') or 'config.human_review_approved'),
             notes=(
-                'Primary approval retargeted to resource-executable candidate; '
+                'Primary approval retargeted to live-capable candidate; '
                 f"previous gated review {reviewed_id or 'n/a'} archived."
             ),
             auto=False,
@@ -386,6 +429,7 @@ def run_campaign_c_automation(
         search_run_id=search_run_id,
         parent_j2_max=parent_j2_max,
         max_executable_j2_max=max_executable_j2_max,
+        max_staged_j2_max=max_staged_j2_max,
     )
     package_root = Path(manifest['package_root'])
     dry = dry_run_lineage_package(package_root)
@@ -410,13 +454,18 @@ def run_campaign_c_automation(
                     search_run_id=search_run_id,
                     parent_j2_max=parent_j2_max,
                     max_executable_j2_max=max_executable_j2_max,
+                    max_staged_j2_max=max_staged_j2_max,
                 )
                 break
 
     status = (
         'READY_FOR_LIVE_EXECUTE'
         if dry.get('live_execute_allowed')
-        else 'MATERIALIZED_RESOURCE_GATED'
+        else (
+            'READY_FOR_STAGED_LIVE_EXECUTE'
+            if dry.get('staged_live_execute_allowed')
+            else 'MATERIALIZED_RESOURCE_GATED'
+        )
     )
     summary = {
         'schema_version': 1,
@@ -435,10 +484,10 @@ def run_campaign_c_automation(
         'generated_at': utc_now(),
         'notes': (
             'Automation completed materialize+dry_run. '
-            'Selection prefers resource-executable candidates when available; '
-            'screening-best (possibly gated) is archived alongside. '
-            'Live M2→M6 GPU execute remains operator-triggered via '
-            'execute_lineage.py when resource_gate.executable is true.'
+            'Selection prefers staged q<1 (j2=2) when available, else '
+            'instant/staged live-capable lowest q; screening-best may be '
+            'archived. Live: execute_lineage.py --live (j2=1) or '
+            '--live --staged (j2=2 sector-batched M2).'
         ),
     }
     atomic_write_json(auto_root / 'STATUS.json', summary)
@@ -452,23 +501,33 @@ def _package_readme(plan: dict[str, Any], gate: dict[str, Any]) -> str:
         '',
         f"- candidate: `{plan.get('candidate_id')}`",
         f"- child runs: `{json.dumps(plan.get('child_run_ids'))}`",
-        f"- resource executable: `{gate.get('executable')}`",
+        f"- resource executable (instant j2=1): `{gate.get('executable')}`",
+        f"- staged executable (j2>=2 batched M2): `{gate.get('staged_executable')}`",
         '',
         '## Commands',
         '',
         '```bash',
         'python execute_lineage.py --dry-run',
-        '# only if resource_gate.executable:',
-        'python execute_lineage.py --live   # still requires accepted M2 parent audits',
+        '# j2_max=1 instant:',
+        'python execute_lineage.py --live',
+        '# j2_max=2 sector-batched M2 (resume across sessions):',
+        'python execute_lineage.py --live --staged',
         '```',
         '',
-        'Dry-run never emits CERTIFIED. Live execute rebuilds M2→M6 under new run IDs.',
+        'Dry-run never emits CERTIFIED. Staged live runs one M2 session per '
+        'invocation until M2_COMPLETE, then rewrites the child M2 audit.',
         '',
     ]
     if gate.get('blocked_reasons'):
-        lines.append('## Resource gate blocks')
+        lines.append('## Instant live blocks')
         lines.append('')
         for reason in gate['blocked_reasons']:
+            lines.append(f'- {reason}')
+        lines.append('')
+    if gate.get('staged_blocked_reasons'):
+        lines.append('## Staged live blocks')
+        lines.append('')
+        for reason in gate['staged_blocked_reasons']:
             lines.append(f'- {reason}')
         lines.append('')
     return '\n'.join(lines) + '\n'
@@ -487,6 +546,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -496,22 +556,52 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--dry-run', action='store_true', default=True)
     parser.add_argument('--live', action='store_true')
+    parser.add_argument(
+        '--staged', action='store_true',
+        help='Sector-batched M2 path for j2_max>=2',
+    )
+    parser.add_argument(
+        '--persistent-root',
+        default=os.environ.get(
+            'VALIDATED_RG_PERSISTENT_ROOT',
+            '/storage/validated_4d_su2_rg',
+        ),
+    )
+    parser.add_argument(
+        '--project-root',
+        default=os.environ.get('VALIDATED_RG_PROJECT_ROOT', str(Path.cwd())),
+    )
     args = parser.parse_args()
     gate = json.loads((ROOT / 'resource_gate.json').read_text())
     print('candidate', {candidate_id!r})
     print('child_run_ids', {json.dumps(child_ids)!r})
     print('j2_max', {j2_max})
     print('resource_executable', gate.get('executable'))
+    print('staged_executable', gate.get('staged_executable'))
     if args.live:
+        if args.staged or (not gate.get('executable') and gate.get('staged_executable')):
+            if not gate.get('staged_executable'):
+                raise SystemExit(
+                    'Staged live blocked: '
+                    + '; '.join(gate.get('staged_blocked_reasons') or [])
+                )
+            from src.m7_staged_lineage import run_staged_lineage_from_package
+            report = run_staged_lineage_from_package(
+                ROOT,
+                persistent_root=Path(args.persistent_root),
+                project_root=Path(args.project_root),
+            )
+            print(json.dumps(report, indent=2, sort_keys=True, default=str))
+            return
         if not gate.get('executable'):
             raise SystemExit(
                 'Live execute blocked by resource_gate: '
                 + '; '.join(gate.get('blocked_reasons') or [])
+                + '; try --live --staged if staged_executable'
             )
         raise SystemExit(
-            'Live M2→M6 orchestration is prepared but still requires '
-            'accepted parent audits and operator GPU session; use milestone '
-            'notebooks with the child_run_ids in this package.'
+            'Instant j2=1 live M2→M6 still uses milestone notebooks with '
+            'child_run_ids in this package (operator GPU session).'
         )
     from src.m7_auto_execute import dry_run_lineage_package
     report = dry_run_lineage_package(ROOT)

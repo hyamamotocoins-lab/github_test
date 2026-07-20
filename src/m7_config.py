@@ -38,6 +38,7 @@ class M7Config:
     # Auto pipeline: after plan_only, materialize+dry_run best candidate.
     auto_approve_for_materialize: bool = False
     max_executable_j2_max: int = 2
+    max_staged_j2_max: int = 2
 
     def payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -151,14 +152,15 @@ def campaign_c_search_space() -> dict[str, Any]:
         'math_locks': {
             'resource_gate': (
                 'Configs accept j2_max in [1,4] with derived dims. '
-                'Live exact-M2 auto-execute remains gated to j2_max=1; '
-                'higher cutoffs materialize+dry_run and need staged M2 acceptance.'
+                'j2=1: instant live; j2=2: staged sector-batched M2 '
+                '(READY_FOR_STAGED_LIVE_EXECUTE / --live --staged); '
+                'j2>max_staged: materialize+dry_run archive only.'
             ),
         },
         'notes': (
-            'Campaign C invalidates M2–M6. Use lineage_mode=auto to '
-            'auto-select best plan, stamp/await review, materialize package, '
-            'and dry-run config construction.'
+            'Campaign C invalidates M2–M6. lineage_mode=auto selects staged '
+            'q<1 (j2=2) when screening estimates allow, else live-capable '
+            'lowest q; materialize+dry_run always.'
         ),
     }
 

@@ -159,10 +159,13 @@ def generate_campaign_c_candidates(
     layers = space['layers']
     candidates: list[dict[str, Any]] = []
     index = 0
-    # Emit executable j2_max=1 schemes first so auto/replays always see a
-    # resource-feasible lineage, then higher cutoffs for screening archive.
+    # Prefer staged j2=2 (q<1 hunt) and instant j2=1 before higher gated cutoffs.
     j2_all = sorted({int(v) for v in layers['j2_max']})
-    j2_values = [j for j in j2_all if j == 1] + [j for j in reversed(j2_all) if j != 1]
+    j2_values = (
+        [j for j in j2_all if j == 2]
+        + [j for j in j2_all if j == 1]
+        + [j for j in reversed(j2_all) if j not in {1, 2}]
+    )
     geometries = list(reversed(list(layers['block_geometry'])))
     for j2_max in j2_values:
         for channel_policy in layers['channel_policy']:

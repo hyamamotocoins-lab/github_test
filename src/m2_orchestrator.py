@@ -25,6 +25,10 @@ from .dense_reference import (
     build_dense_reference, exact_matrix_difference_zero, matrix_hash,
 )
 from .fusion import convention_hash, convention_payload, representation_dimension
+from .cutoff_dims import expected_m2_gate_counts
+from .m2_batching import (
+    BATCHED_M2_PHASES, m2_batch_plan, predicted_batch_s,
+)
 from .m2_config import M2Config
 from .m2_parent import M2ParentError, verify_accepted_m1_parent
 from .m2_reporting import (
@@ -173,53 +177,86 @@ class M2Orchestrator:
             'regeneration_sha256_match': True,
         }
 
-    def _compute_dense(self) -> dict[str, Any]:
+    def _sector_keys_for_item(self, item: WorkItem):
+        keys = all_link_star_keys(self.config.j2_max)
+        if 'batch_index' not in item.parameters:
+            return keys
+        start = int(item.parameters['batch_start'])
+        size = int(item.parameters['batch_size'])
+        return keys[start:start + size]
+
+    def _compute_dense(self, item: WorkItem) -> dict[str, Any]:
+        keys = self._sector_keys_for_item(item)
         sectors: list[dict[str, Any]] = []
         zero_count = 0
         residual_count = 0
-        for key in all_link_star_keys(self.config.j2_max):
+        for key in keys:
             dense = build_dense_reference(key.representations, key.orientations)
             residual_count += int(dense.generator_residual_zero)
             is_zero = not any(dense.projector)
             if sum(key.representations) % 2 and is_zero:
                 zero_count += 1
             sectors.append({
-                'representations': list(key.representations),
+                'reps': list(key.representations),
                 'orientations': list(key.orientations),
                 'dense_dimension': representation_dimension(key.representations),
                 'singlet_rank': dense.singlet_rank,
                 'projector_hash': matrix_hash(dense.projector),
                 'generator_residual_zero': dense.generator_residual_zero,
             })
-        if residual_count != 64 or zero_count != 32:
-            raise ArithmeticError('Dense reference exact gauge checks failed closed.')
-        return {
+        if 'batch_index' not in item.parameters:
+            expected = expected_m2_gate_counts(self.config.j2_max)
+            if (
+                residual_count != expected['generator_residual_zero_count']
+                or zero_count != expected['odd_half_zero_count']
+            ):
+                raise ArithmeticError('Dense reference exact gauge checks failed closed.')
+        payload = {
             'status': 'PASS', 'sector_count': len(sectors),
             'generator_residual_zero_count': residual_count,
             'odd_half_zero_count': zero_count, 'sectors': sectors,
         }
+        if 'batch_index' in item.parameters:
+            payload.update({
+                'batch_index': int(item.parameters['batch_index']),
+                'batch_start': int(item.parameters['batch_start']),
+                'partial': True,
+            })
+        return payload
 
-    def _compute_armillary(self) -> dict[str, Any]:
-        built = [
-            build_armillary_sector(key)
-            for key in all_link_star_keys(self.config.j2_max)
-        ]
+    def _compute_armillary(self, item: WorkItem) -> dict[str, Any]:
+        keys = self._sector_keys_for_item(item)
+        built = [build_armillary_sector(key) for key in keys]
         isometry_count = sum(sector.isometry_exact for sector in built)
-        if isometry_count != 64:
-            raise ArithmeticError('Armillary exact isometry checks failed closed.')
-        self.tensors = checkpoint_tensor_shards(built)
-        return {
+        batch_tensors = checkpoint_tensor_shards(built)
+        if 'batch_index' not in item.parameters:
+            expected = expected_m2_gate_counts(self.config.j2_max)
+            if isometry_count != expected['isometry_exact_count']:
+                raise ArithmeticError('Armillary exact isometry checks failed closed.')
+            self.tensors = batch_tensors
+        else:
+            if isometry_count != len(built):
+                raise ArithmeticError('Armillary batch isometry checks failed closed.')
+            self.tensors.update(batch_tensors)
+        payload = {
             'status': 'PASS', 'sector_count': len(built),
             'isometry_exact_count': isometry_count,
-            'checkpoint_tensor_count': len(self.tensors),
+            'checkpoint_tensor_count': len(batch_tensors),
             'sectors': [sector_summary(sector) for sector in built],
         }
+        if 'batch_index' in item.parameters:
+            payload.update({
+                'batch_index': int(item.parameters['batch_index']),
+                'batch_start': int(item.parameters['batch_start']),
+                'partial': True,
+            })
+        return payload
 
-    def _compute_equivalence(self) -> dict[str, Any]:
+    def _compute_equivalence(self, item: WorkItem) -> dict[str, Any]:
         mismatches: list[list[int]] = []
         matches = 0
         max_dimension = 0
-        keys = all_link_star_keys(self.config.j2_max)
+        keys = self._sector_keys_for_item(item)
         for key in keys:
             dense = build_dense_reference(key.representations, key.orientations)
             armillary = build_armillary_sector(key)
@@ -238,14 +275,25 @@ class M2Orchestrator:
                 matches += 1
             else:
                 mismatches.append(list(key.representations))
-        if mismatches or matches != 64:
-            raise ArithmeticError(f'Dense/armillary exact mismatches: {mismatches}')
-        return {
+        if 'batch_index' not in item.parameters:
+            expected = expected_m2_gate_counts(self.config.j2_max)
+            if mismatches or matches != expected['exact_match_count']:
+                raise ArithmeticError(f'Dense/armillary exact mismatches: {mismatches}')
+        elif mismatches or matches != len(keys):
+            raise ArithmeticError(f'Dense/armillary batch mismatches: {mismatches}')
+        payload = {
             'status': 'PASS', 'sector_count': len(keys),
             'exact_match_count': matches, 'mismatches': mismatches,
             'max_dense_dimension': max_dimension,
             'comparison': 'exact symbolic matrix equality',
         }
+        if 'batch_index' in item.parameters:
+            payload.update({
+                'batch_index': int(item.parameters['batch_index']),
+                'batch_start': int(item.parameters['batch_start']),
+                'partial': True,
+            })
+        return payload
 
     def _compute_symmetry(self) -> dict[str, Any]:
         keys = all_link_star_keys(self.config.j2_max)
@@ -270,16 +318,18 @@ class M2Orchestrator:
         if item.phase == 'M2_WIGNER_CACHE':
             return self._compute_wigner(temporary)
         if item.phase == 'M2_DENSE_REFERENCE':
-            return self._compute_dense()
+            return self._compute_dense(item)
         if item.phase == 'M2_ARMILLARY':
-            return self._compute_armillary()
+            return self._compute_armillary(item)
         if item.phase == 'M2_EQUIVALENCE':
-            return self._compute_equivalence()
+            return self._compute_equivalence(item)
         if item.phase == 'M2_SYMMETRY':
             return self._compute_symmetry()
         if item.phase == 'M2_REPORT':
             required = M2_PHASE_ORDER[:-1]
-            results = load_m2_phase_results(self.run_root, self.queue)
+            results = load_m2_phase_results(
+                self.run_root, self.queue, j2_max=self.config.j2_max,
+            )
             missing = [phase for phase in required if phase not in results]
             if missing:
                 raise RuntimeError(f'M2 report work item is missing inputs: {missing}')
@@ -385,9 +435,12 @@ class M2Orchestrator:
                     raise RuntimeError(
                         'M2 cannot complete with failed/blocked/running work items.',
                     )
-                results = load_m2_phase_results(self.run_root, self.queue)
+                results = load_m2_phase_results(
+                    self.run_root, self.queue, j2_max=self.config.j2_max,
+                )
                 validate_m2_acceptance(
                     self.state, self.queue, results, self.test_report,
+                    j2_max=self.config.j2_max,
                 )
                 self.state.bounds = {
                     'dense_total_generator_residuals': 'EXACT_SYMBOLIC_ZERO',
@@ -584,11 +637,33 @@ def create_or_resume_m2(
         milestone='M2', phase='M2_BOOTSTRAP',
     )
     queue = WorkQueue()
+    plan = m2_batch_plan(config.j2_max, config.sector_batch_size)
     for phase in M2_PHASE_ORDER:
-        queue.add(
-            phase, config_hash, {'milestone': 'M2', 'phase': phase},
-            predicted_s=5.0 * 60.0,
-        )
+        if phase in BATCHED_M2_PHASES and plan['batched']:
+            batch_size = int(plan['sector_batch_size'])
+            total = int(plan['total_sectors'])
+            for batch_index in range(int(plan['n_batches'])):
+                start = batch_index * batch_size
+                size = min(batch_size, total - start)
+                queue.add(
+                    phase,
+                    config_hash,
+                    {
+                        'milestone': 'M2',
+                        'phase': phase,
+                        'batch_index': batch_index,
+                        'batch_start': start,
+                        'batch_size': size,
+                        'total_sectors': total,
+                        'n_batches': int(plan['n_batches']),
+                    },
+                    predicted_s=predicted_batch_s(size),
+                )
+        else:
+            queue.add(
+                phase, config_hash, {'milestone': 'M2', 'phase': phase},
+                predicted_s=5.0 * 60.0,
+            )
     manager = CheckpointManager(
         run_root, config, source_hash, notebook_hash,
     )

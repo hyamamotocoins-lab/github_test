@@ -52,7 +52,9 @@ def _finite_nonnegative(value: object) -> bool:
 
 def m3_acceptance_gates(
     state: RunState, queue: WorkQueue, results: dict[str, dict[str, Any]],
-    test_report: dict[str, Any],
+    test_report: dict[str, Any], *,
+    sector_count: int = 64,
+    operator_dimension: int = 729,
 ) -> dict[str, bool]:
     backend = results.get('M3_BACKEND_DIAGNOSTIC', {}).get('result', {})
     operator = results.get('M3_OPERATOR_BUILD', {}).get('result', {})
@@ -80,9 +82,9 @@ def m3_acceptance_gates(
         ),
         'operator_parent_shards_complete': (
             operator.get('status') == 'PASS'
-            and operator.get('sector_count') == 64
-            and operator.get('dimension') == 729
-            and operator.get('parent_tensor_count') == 64
+            and operator.get('sector_count') == sector_count
+            and operator.get('dimension') == operator_dimension
+            and operator.get('parent_tensor_count') == sector_count
         ),
         'matrix_free_matches_explicit': (
             validation.get('status') == 'PASS'
@@ -122,12 +124,18 @@ def m3_acceptance_gates(
 
 def validate_m3_acceptance(
     state: RunState, queue: WorkQueue, results: dict[str, dict[str, Any]],
-    test_report: dict[str, Any],
+    test_report: dict[str, Any], *,
+    sector_count: int = 64,
+    operator_dimension: int = 729,
 ) -> dict[str, bool]:
     missing = [phase for phase in M3_PHASES if phase not in results]
     if missing:
         raise RuntimeError(f'M3 acceptance is missing phase artifacts: {missing}')
-    gates = m3_acceptance_gates(state, queue, results, test_report)
+    gates = m3_acceptance_gates(
+        state, queue, results, test_report,
+        sector_count=sector_count,
+        operator_dimension=operator_dimension,
+    )
     failed = [name for name, value in gates.items() if not value]
     if failed:
         raise RuntimeError(f'M3 acceptance failed closed: {failed}')
@@ -179,7 +187,11 @@ def write_m3_report_package(
     manifest: dict[str, Any],
 ) -> dict[str, str]:
     results = load_m3_phase_results(run_root, queue)
-    gates = validate_m3_acceptance(state, queue, results, test_report)
+    gates = validate_m3_acceptance(
+        state, queue, results, test_report,
+        sector_count=config.sector_count,
+        operator_dimension=config.operator_dimension,
+    )
     rsvd = results['M3_RSVD']['result']
     report = {
         'schema_version': 1, 'milestone': 'M3', 'phase': state.phase,

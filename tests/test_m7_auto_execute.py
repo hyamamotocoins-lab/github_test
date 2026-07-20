@@ -34,10 +34,18 @@ def test_cutoff_dims_match_pilot() -> None:
     assert operator_dimension(2) == 46656
 
 
-def test_resource_gate_blocks_j2_gt_1_for_live() -> None:
-    gate = resource_gate(4, max_executable_j2_max=2)
-    assert gate['executable'] is False
-    assert gate['sector_count'] == 15625
+def test_resource_gate_blocks_j2_gt_1_for_instant_allows_staged_j2_2() -> None:
+    gate4 = resource_gate(4, max_executable_j2_max=2, max_staged_j2_max=2)
+    assert gate4['executable'] is False
+    assert gate4['staged_executable'] is False
+    assert gate4['sector_count'] == 15625
+    gate2 = resource_gate(2, max_executable_j2_max=2, max_staged_j2_max=2)
+    assert gate2['executable'] is False
+    assert gate2['staged_executable'] is True
+    assert gate2['default_sector_batch_size'] == 16
+    gate1 = resource_gate(1)
+    assert gate1['executable'] is True
+    assert gate1['staged_executable'] is False
 
 
 def test_campaign_c_auto_materialize_and_dry_run(tmp_path: Path) -> None:
@@ -63,6 +71,7 @@ def test_campaign_c_auto_materialize_and_dry_run(tmp_path: Path) -> None:
     assert auto['status'] in {
         'MATERIALIZED_RESOURCE_GATED',
         'READY_FOR_LIVE_EXECUTE',
+        'READY_FOR_STAGED_LIVE_EXECUTE',
         'WAITING_HUMAN_REVIEW',
     }
     # With auto_approve, should not wait.
@@ -92,6 +101,31 @@ def test_select_best_prefers_executable_over_lower_gated_q() -> None:
     assert best['candidate_id'] == 'CAND-exec'
     assert best['selection_policy'] == 'prefer_executable_lowest_q'
     assert best['screening_best_candidate_id'] == 'CAND-gated'
+
+
+def test_select_best_prefers_staged_q_lt_1_over_j2_1() -> None:
+    ranking = {
+        'ranking': [
+            {
+                'candidate_id': 'CAND-j1',
+                'q_cert_upper': '1.80',
+                'scheme': {'change_class': 'S3', 'j2_max': 1},
+            },
+            {
+                'candidate_id': 'CAND-j2',
+                'q_cert_upper': '0.95',
+                'scheme': {'change_class': 'S3', 'j2_max': 2},
+            },
+            {
+                'candidate_id': 'CAND-j4',
+                'q_cert_upper': '0.81',
+                'scheme': {'change_class': 'S3', 'j2_max': 4},
+            },
+        ]
+    }
+    best = select_best_lineage_candidate(ranking, max_staged_j2_max=2)
+    assert best['candidate_id'] == 'CAND-j2'
+    assert best['selection_policy'] == 'prefer_staged_q_lt_1'
 
 
 def test_select_best_and_manual_materialize(tmp_path: Path) -> None:

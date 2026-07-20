@@ -8,6 +8,8 @@ from .common import (
     atomic_write_json, atomic_write_text, read_json, safe_component, sha256_file,
     utc_now,
 )
+from .cutoff_dims import expected_m2_gate_counts
+from .m2_batching import merge_m2_batch_payloads, proof_artifact_hash_map
 from .m2_config import M2Config
 from .reporting import peak_memory_report
 from .work_queue import WorkQueue
@@ -19,14 +21,13 @@ REQUIRED_PHASES = (
 
 
 def load_m2_phase_results(
-    run_root: Path, queue: WorkQueue,
+    run_root: Path, queue: WorkQueue, *, j2_max: int = 1,
 ) -> dict[str, dict[str, Any]]:
-    results: dict[str, dict[str, Any]] = {}
+    singles: dict[str, dict[str, Any]] = {}
+    batches: dict[str, list[dict[str, Any]]] = {}
     for item in queue.items.values():
         if item.status != 'done' or not item.result_relpath:
             continue
-        if item.phase in results:
-            raise RuntimeError(f'Duplicate completed M2 phase artifact: {item.phase}')
         result_path = (run_root / item.result_relpath).resolve()
         try:
             result_path.relative_to(run_root.resolve())
@@ -54,14 +55,27 @@ def load_m2_phase_results(
                 cache_path = result_path.parent / filename
                 if not cache_path.is_file() or sha256_file(cache_path) != digest:
                     raise RuntimeError('M2 Wigner cache artifact hash mismatch.')
-        results[item.phase] = payload
+        if 'batch_index' in item.parameters:
+            batches.setdefault(item.phase, []).append(payload)
+        else:
+            if item.phase in singles or item.phase in batches:
+                raise RuntimeError(f'Duplicate completed M2 phase artifact: {item.phase}')
+            singles[item.phase] = payload
+    results = dict(singles)
+    for phase, payloads in batches.items():
+        if phase in singles:
+            raise RuntimeError(f'Mixed batched/unbatched artifacts for {phase}')
+        results[phase] = merge_m2_batch_payloads(phase, payloads, j2_max=j2_max)
     return results
 
 
 def _acceptance_gates(
     state: RunState, queue: WorkQueue, results: dict[str, dict[str, Any]],
-    test_report: dict[str, Any],
+    test_report: dict[str, Any], *, j2_max: int,
 ) -> dict[str, bool]:
+    expected = expected_m2_gate_counts(j2_max)
+    n = expected['sector_count']
+    odd = expected['odd_half_zero_count']
     wigner = results.get('M2_WIGNER_CACHE', {}).get('result', {})
     dense = results.get('M2_DENSE_REFERENCE', {}).get('result', {})
     armillary = results.get('M2_ARMILLARY', {}).get('result', {})
@@ -85,25 +99,25 @@ def _acceptance_gates(
         ),
         'dense_reference_all_sectors': (
             dense.get('status') == 'PASS'
-            and dense.get('sector_count') == 64
-            and dense.get('generator_residual_zero_count') == 64
+            and dense.get('sector_count') == n
+            and dense.get('generator_residual_zero_count') == n
         ),
-        'gauge_noninvariant_sectors_vanish': dense.get('odd_half_zero_count') == 32,
+        'gauge_noninvariant_sectors_vanish': dense.get('odd_half_zero_count') == odd,
         'armillary_all_sectors_exact_isometries': (
             armillary.get('status') == 'PASS'
-            and armillary.get('sector_count') == 64
-            and armillary.get('isometry_exact_count') == 64
+            and armillary.get('sector_count') == n
+            and armillary.get('isometry_exact_count') == n
         ),
         'dense_armillary_exact_equivalence': (
             equivalence.get('status') == 'PASS'
-            and equivalence.get('exact_match_count') == 64
+            and equivalence.get('exact_match_count') == n
             and equivalence.get('mismatches') == []
         ),
         'cubic_symmetry_deterministic': (
             symmetry.get('status') == 'PASS'
             and symmetry.get('group_order') == 48
             and symmetry.get('deterministic') is True
-            and 1 < symmetry.get('canonical_sector_count', 0) < 64
+            and 1 < symmetry.get('canonical_sector_count', 0) < n
         ),
         'report_work_item_ready': report.get('status') == 'READY',
         'queue_complete': bool(statuses) and all(status == 'done' for status in statuses),
@@ -113,12 +127,14 @@ def _acceptance_gates(
 
 def validate_m2_acceptance(
     state: RunState, queue: WorkQueue, results: dict[str, dict[str, Any]],
-    test_report: dict[str, Any],
+    test_report: dict[str, Any], *, j2_max: int = 1,
 ) -> dict[str, bool]:
     missing = [phase for phase in REQUIRED_PHASES if phase not in results]
     if missing:
         raise RuntimeError(f'M2 acceptance is missing phase artifacts: {missing}')
-    gates = _acceptance_gates(state, queue, results, test_report)
+    gates = _acceptance_gates(
+        state, queue, results, test_report, j2_max=j2_max,
+    )
     failed = [name for name, passed in gates.items() if not passed]
     if failed:
         raise RuntimeError(f'M2 acceptance gates failed closed: {failed}')
@@ -131,13 +147,17 @@ def _markdown_report(report: dict[str, Any]) -> str:
     armillary = results['M2_ARMILLARY']['result']
     equivalence = results['M2_EQUIVALENCE']['result']
     symmetry = results['M2_SYMMETRY']['result']
+    j2_max = int(report.get('config', {}).get('j2_max', 1))
+    expected = expected_m2_gate_counts(j2_max)
+    n = expected['sector_count']
+    odd = expected['odd_half_zero_count']
     return '\n'.join([
         '# M2 low-cutoff 4D SU(2) armillary report', '',
         f"- run ID: `{report['run_id']}`",
         f"- accepted M1 parent: `{report['parent']['parent_run_id']}`",
         '- human decision: M1 accepted for M2 implementation',
         '- status: `NOT_CERTIFIED`',
-        '- scope: local six-leg 4D link-star identity at `j2_max=1`; no 4D RG claim', '',
+        f'- scope: local six-leg 4D link-star identity at `j2_max={j2_max}`; no 4D RG claim', '',
         '## Fixed conventions', '',
         '- irrep coordinate: `j2=2j`',
         '- magnetic order: `m2=j2,j2-2,...,-j2`',
@@ -147,17 +167,17 @@ def _markdown_report(report: dict[str, Any]) -> str:
         '- duality: `C|j,m> = (-1)^(j-m)|j,-m>`',
         '- normalization: orthonormal CG basis and normalized Haar projector', '',
         '## Exact checks', '',
-        f"- dense sectors with exact zero generator residual: {dense['generator_residual_zero_count']}/64",
-        f"- gauge-noninvariant odd-half sectors exactly zero: {dense['odd_half_zero_count']}/32",
-        f"- armillary exact isometries: {armillary['isometry_exact_count']}/64",
-        f"- dense–armillary exact matrix matches: {equivalence['exact_match_count']}/64",
+        f"- dense sectors with exact zero generator residual: {dense['generator_residual_zero_count']}/{n}",
+        f"- gauge-noninvariant odd-half sectors exactly zero: {dense['odd_half_zero_count']}/{odd}",
+        f"- armillary exact isometries: {armillary['isometry_exact_count']}/{n}",
+        f"- dense–armillary exact matrix matches: {equivalence['exact_match_count']}/{n}",
         f"- transverse cubic actions: {symmetry['group_order']}",
         f"- deterministic canonical sectors: {symmetry['canonical_sector_count']}", '',
         'The dense reference is obtained from the exact simultaneous kernel of the total SU(2) generators. '
         'The armillary representation is obtained independently from a fixed exact CG fusion basis. '
         'Acceptance compares the resulting symbolic matrices exactly; float64 tensor shards are restart diagnostics only.', '',
         '## Proven at M2', '',
-        '- At `j2_max=1`, all 64 representation sectors of the six-leg link star have exact dense/armillary projector equality.',
+        f'- At `j2_max={j2_max}`, all {n} representation sectors of the six-leg link star have exact dense/armillary projector equality.',
         '- The phase, orientation, duality, fusion-tree, and normalization conventions are pinned by content hashes.',
         '- Deterministic cache regeneration, symmetry canonicalization, checkpoint fallback, and fresh-process resume pass.', '',
         '## Limitations', '',
@@ -173,8 +193,13 @@ def write_m2_report_package(
     test_report: dict[str, Any], last_checkpoint: CheckpointSaveResult,
     manifest: dict[str, Any],
 ) -> dict[str, str]:
-    results = load_m2_phase_results(run_root, queue)
-    gates = validate_m2_acceptance(state, queue, results, test_report)
+    results = load_m2_phase_results(run_root, queue, j2_max=config.j2_max)
+    gates = validate_m2_acceptance(
+        state, queue, results, test_report, j2_max=config.j2_max,
+    )
+    expected = expected_m2_gate_counts(config.j2_max)
+    n = expected['sector_count']
+    odd = expected['odd_half_zero_count']
     report = {
         'schema_version': 1, 'milestone': 'M2', 'phase': state.phase,
         'run_id': state.run_id, 'generated_at': utc_now(),
@@ -190,10 +215,7 @@ def write_m2_report_package(
         'convention_hash': manifest['convention_hash'],
         'governing_document_hashes': manifest['governing_document_hashes'],
         'results': results, 'tests': test_report, 'acceptance_gates': gates,
-        'proof_artifact_hashes': {
-            item.phase: item.result_sha256 for item in queue.items.values()
-            if item.status == 'done' and item.result_sha256 is not None
-        },
+        'proof_artifact_hashes': proof_artifact_hash_map(queue.items.values()),
         'checkpoint': {
             'path': str(last_checkpoint.path), 'index': last_checkpoint.index,
             'size_bytes': last_checkpoint.size_bytes, 'save_s': last_checkpoint.save_s,
@@ -201,10 +223,10 @@ def write_m2_report_package(
         },
         'memory': peak_memory_report(),
         'rigorous_results': [
-            'exact total-generator dense Haar projectors for all 64 sectors',
-            'exact fixed-CG armillary basis maps for all 64 sectors',
+            f'exact total-generator dense Haar projectors for all {n} sectors',
+            f'exact fixed-CG armillary basis maps for all {n} sectors',
             'exact symbolic equality of every dense and reconstructed projector',
-            'exact vanishing of all 32 odd-half-spin sectors',
+            f'exact vanishing of all {odd} odd-half-spin sectors',
         ],
         'heuristic_results': [],
         'unresolved_issues': [
