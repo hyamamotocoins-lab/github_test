@@ -617,9 +617,21 @@ def create_or_resume_m3(
             )
         print('Resumed M3 from:', loaded.path)
         return orchestrator
-    if run_root.exists():
+    if run_root.exists() and not (run_root / 'run_config.json').is_file():
+        # Notebooks may pre-seed only test_report.json before create_or_resume.
+        unexpected = sorted(
+            path.name for path in run_root.iterdir()
+            if path.name not in {'test_report.json'} and not path.name.startswith('.')
+        )
+        if unexpected:
+            raise M3CompatibilityError(
+                'Incomplete M3 run directory exists with unexpected entries: '
+                + ', '.join(unexpected)
+                + f'. Rename or remove {run_root} then retry.'
+            )
+    elif run_root.exists():
         raise M3CompatibilityError('Incomplete M3 run directory exists.')
-    run_root.mkdir(parents=True, exist_ok=False)
+    run_root.mkdir(parents=True, exist_ok=True)
     for relative in (
         'logs', 'reports', 'artifacts', 'work_items', 'checkpoints', 'cache',
     ):
