@@ -515,6 +515,8 @@ class M2Orchestrator:
 def create_or_resume_m2(
     persistent_root: Path, config: M2Config, project_root: Path,
     run_id: str | None = None, test_report: dict[str, Any] | None = None,
+    *,
+    allow_code_drift: bool = False,
 ) -> M2Orchestrator:
     try:
         parent_hashes = verify_accepted_m1_parent(project_root, config)
@@ -527,6 +529,14 @@ def create_or_resume_m2(
     reference_hashes = reference_artifact_hashes(project_root)
     environment = environment_info()
     runtime_signature = runtime_compatibility_signature(environment)
+    # Staged multi-session child M2 may pull controller code between sessions.
+    env_drift = os.environ.get('VALIDATED_RG_M2_ALLOW_CODE_DRIFT', '').strip().lower()
+    allow_code_drift = bool(
+        allow_code_drift or env_drift in {'1', 'true', 'yes', 'on'}
+    )
+    relax_fields = {
+        'source_hash', 'notebook_hash', 'runtime_compatibility',
+    } if allow_code_drift else set()
     runs_root = persistent_root / 'runs'
     runs_root.mkdir(parents=True, exist_ok=True)
     requested = run_id or os.environ.get('VALIDATED_RG_M2_RUN_ID')
@@ -568,12 +578,44 @@ def create_or_resume_m2(
         if not manifest_path.is_file():
             raise M2CompatibilityError('Existing M2 run lacks run_manifest.json.')
         manifest = read_json(manifest_path)
-        if not isinstance(manifest, dict) or any(
-            manifest.get(key) != value
+        if not isinstance(manifest, dict):
+            raise M2CompatibilityError('Existing M2 run lacks a valid manifest.')
+        mismatches = {
+            key: {'expected': value, 'found': manifest.get(key)}
             for key, value in immutable_manifest_fields.items()
-        ):
+            if key not in relax_fields and manifest.get(key) != value
+        }
+        if mismatches:
             raise M2CompatibilityError(
-                'M2 manifest/source/parent/runtime identity changed.',
+                'M2 manifest/source/parent/runtime identity changed: '
+                + ', '.join(sorted(mismatches))
+            )
+        drifted = {
+            key: {
+                'manifest': manifest.get(key),
+                'current': immutable_manifest_fields.get(key),
+            }
+            for key in relax_fields
+            if manifest.get(key) != immutable_manifest_fields.get(key)
+        }
+        if drifted:
+            reports_dir = run_root / 'reports'
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(reports_dir / 'code_drift.json', {
+                'schema_version': 1,
+                'allow_code_drift': True,
+                'recorded_at': utc_now(),
+                'run_id': requested,
+                'drifted_fields': drifted,
+                'note': (
+                    'Controller source/runtime drifted since run creation; '
+                    'config_hash and M1 parent identity remain pinned. '
+                    'Staged child M2 resume only — not a CERTIFIED claim.'
+                ),
+            })
+            print(
+                'WARNING: resuming M2 with code drift:',
+                ', '.join(sorted(drifted)),
             )
         saved_test_report_path = run_root / 'test_report.json'
         if test_report is None:
@@ -587,6 +629,7 @@ def create_or_resume_m2(
             atomic_write_json(saved_test_report_path, test_report)
         manager = CheckpointManager(
             run_root, config, source_hash, notebook_hash,
+            require_source_match=not allow_code_drift,
         )
         loaded = manager.load_latest(restore_rng=True)
         if loaded is None:

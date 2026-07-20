@@ -147,6 +147,7 @@ def run_staged_m2_session(
         project_root,
         run_id=run_id,
         test_report=test_report,
+        allow_code_drift=True,
     )
     summary = orch.run_until_checkpoint()
     summary['resource_gate'] = gate

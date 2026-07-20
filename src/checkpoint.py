@@ -333,11 +333,20 @@ class TensorShardStore:
 
 
 class CheckpointManager:
-    def __init__(self, run_root: Path, config: CheckpointConfig, source_hash: str, notebook_hash: str | None) -> None:
+    def __init__(
+        self,
+        run_root: Path,
+        config: CheckpointConfig,
+        source_hash: str,
+        notebook_hash: str | None,
+        *,
+        require_source_match: bool = True,
+    ) -> None:
         self.run_root = run_root
         self.config = config
         self.source_hash = source_hash
         self.notebook_hash = notebook_hash
+        self.require_source_match = require_source_match
         self.checkpoint_root = run_root / 'checkpoints'
         self.checkpoint_root.mkdir(parents=True, exist_ok=True)
         self.tensor_store = TensorShardStore(config.tensor_shard_bytes)
@@ -442,9 +451,9 @@ class CheckpointManager:
             raise ConfigMismatchError(f'Checkpoint config mismatch: {path}')
         if meta.get('config') != self.config.canonical_payload():
             raise ConfigMismatchError(f'Checkpoint canonical config mismatch: {path}')
-        if meta.get('source_hash') != self.source_hash:
+        if self.require_source_match and meta.get('source_hash') != self.source_hash:
             raise ConfigMismatchError(f'Checkpoint source hash mismatch: {path}')
-        if meta.get('notebook_hash') != self.notebook_hash:
+        if self.require_source_match and meta.get('notebook_hash') != self.notebook_hash:
             raise ConfigMismatchError(f'Checkpoint notebook source hash mismatch: {path}')
 
     def load_latest(self, restore_rng: bool = True) -> LoadedCheckpoint | None:
