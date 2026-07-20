@@ -1,0 +1,105 @@
+{
+  "acceptance_basis": "USER_SPECIFIED_M4_M5_BOUNDARY_AFTER_CODE_AND_FROZEN_ARTIFACT_REVIEW",
+  "accepted_for_next_milestone": "M5",
+  "accepted_phase": "M4_COMPLETE",
+  "accepted_run_id": "M4-20260720T021737Z-b9c9514fed11",
+  "bound_ledger": {
+    "closed_in_M4": [
+      "forward tangent construction",
+      "tangent checkpoint restore",
+      "zero tangent consistency",
+      "symmetry consistency",
+      "finite-difference regression"
+    ],
+    "open_for_M5": [
+      "GPU rounding and backward error",
+      "M3 RSVD projection residual",
+      "cutoff and rank dependence",
+      "initial representation tail",
+      "input radius propagation",
+      "normalization and denominator error",
+      "omitted fusion and channel tail",
+      "basis variation residual"
+    ]
+  },
+  "certification_status": "NOT_CERTIFIED",
+  "checkpoint_hash_manifest_sha256": "00af079071205e916c5b2faaab489d0b18cabd0d1a1d53344a5b15f514f1946f",
+  "checkpoint_index": 14,
+  "checkpoint_path": "/storage/validated_4d_su2_rg/runs/M4-20260720T021737Z-b9c9514fed11/checkpoints/ckpt_000014",
+  "decision": "ACCEPT_M4_DERIVATIVE_FOR_M5_ONE_STEP_VALIDATION",
+  "decision_scope": "M5 deterministic one-step validation may begin with all open proof obligations retained. No one-step enclosure, multi-step result, mass-gap, thermodynamic-limit, continuum, or CERTIFIED claim is authorized.",
+  "derivative_regression": {
+    "all_channels_converged": true,
+    "channel_count": 5,
+    "classification": "REPRODUCIBLE_REGRESSION_ACCEPTANCE_NOT_A_DETERMINISTIC_PROOF_BOUND",
+    "configured_relative_tolerance": 2e-06,
+    "finite_difference_is_proof_bound": false,
+    "max_final_relative_error": 1.4711130563690561e-07,
+    "maximum_observed_centered_fd_order": 2.0000268558338945,
+    "minimum_observed_centered_fd_order": 1.999942774715025,
+    "steps": [
+      0.001,
+      0.0005,
+      0.00025
+    ],
+    "symmetry_residual": 0.0,
+    "zero_tangent_residual": 0.0
+  },
+  "enclosure_status": "BLOCKED_MATH",
+  "generated_at": "2026-07-20T04:27:04Z",
+  "human_readable_decision_ja": "M4のforward tangent、再開、zero tangent、symmetry、有限差分の二次収束を受理し、未解決の誤差境界を0にせずM5へ引き継ぎます。一段enclosureはBLOCKED_MATH、全体はNOT_CERTIFIEDのままです。",
+  "implementation_status": "M4_IMPLEMENTATION_COMPLETE",
+  "independent_artifact_reload_performed": true,
+  "m4_acceptance_path": "/storage/validated_4d_su2_rg/runs/M4-20260720T021737Z-b9c9514fed11/reports/M4_acceptance.json",
+  "m4_acceptance_sha256": "df6db25937a5524264213448ab0270a6d4be12dbcc89b35ca392f022bf94c163",
+  "m4_report_path": "/storage/validated_4d_su2_rg/runs/M4-20260720T021737Z-b9c9514fed11/reports/M4_report.json",
+  "m4_report_sha256": "7762ae9e320843956ef61cf16b2b1cc0ab34b5c2e5b6ee306870fcd451a6a0a6",
+  "manifest_path": "/storage/validated_4d_su2_rg/runs/M4-20260720T021737Z-b9c9514fed11/run_manifest.json",
+  "manifest_sha256": "569b3b53df6e560076e00cae33864f91fee653f884b69b48289c6bac84a82e16",
+  "milestone_reviewed": "M4",
+  "milestone_status": "DERIVATIVE_ACCEPTED",
+  "notebook_hash": "b3871a3ce0be313ef317a29fddd3c0414f10522a71b8308dac769d9bc4212b92",
+  "notebook_hash_policy": "canonical_nbformat4_cell_type_source_tags_v1",
+  "proof_artifact_hashes": {
+    "M4_DUAL_PIPELINE": "233175ad2a97734c2a38c8bac1bc2916583a3cd7c4f28a5f5064ac75bf36f60b",
+    "M4_ERROR_LEDGER": "a9648ede4d28ef2276ec1c3a0dcf22f215fd928bc353c28bd2ff2b87b6416ed8",
+    "M4_FINITE_DIFFERENCE": "125b7ea2daf3082dd1520314d141c433623a1b2e5d60b748266b919196d643d1",
+    "M4_NORMALIZATION": "2b1e97722ee6acee008af04ab15a10a391cb52f82ceeb29eef35be02785f562f",
+    "M4_REPORT": "cd8e39d061a450595ab486cdf4090ee12b2193a3cba711e7a5bcd059f4ef75db",
+    "M4_SOURCE_CHANNELS": "4c47029079ae3ab65b5c84cbc0f9cb602b2e75798927a9701612e23e81e55a2d"
+  },
+  "resource_observations": {
+    "checkpoint_save_s": 0.2150671319104731,
+    "checkpoint_size_bytes": 65970,
+    "checkpoint_verify_s": 0.0026887990534305573,
+    "peak_cpu_ru_maxrss_raw": 518832,
+    "peak_gpu_allocated_bytes": 33568768
+  },
+  "review_checks": {
+    "checkpoint_and_queue_hashes_verified": true,
+    "current_m4_cpu_restart_tests": "9 passed, 1 deselected",
+    "derivative_checkpoint_restore": "PASS",
+    "enclosure_remains_blocked_math": true,
+    "fixed_basis_variation_explicit": true,
+    "fresh_process_resume": "PASS",
+    "not_certified_invariant": true,
+    "original_required_gpu_suite": "PASS",
+    "queue": "6/6 done; pending/running/failed 0",
+    "report_acceptance_gates": "18/18 PASS"
+  },
+  "reviewer": "Codex technical review following the user-specified milestone boundary",
+  "schema_version": 1,
+  "source_hash": "2607ddbf570c96033cf08dba34feb519c02edf4cec7269306c0531541369a5e3",
+  "unresolved_nonclaims": [
+    "GPU rounding and backward error has no deterministic bound.",
+    "M3 RSVD projection residual remains heuristic.",
+    "Cutoff and rank dependence remains unresolved.",
+    "Initial representation tail is not propagated into the M4 operator norm.",
+    "Input radius propagation is missing.",
+    "Normalization and denominator error lacks a rigorous positive lower bound.",
+    "Omitted fusion and channel tail is missing.",
+    "Basis variation residual is explicit but not deterministically bounded.",
+    "Finite-difference convergence is regression evidence, not an enclosure bound.",
+    "No one-step RG enclosure or CERTIFIED claim is made at M4."
+  ]
+}
