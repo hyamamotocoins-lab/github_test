@@ -1,0 +1,25 @@
+schema_version: 1
+campaign: B_S2
+
+rank:
+  values: [16, 24, 32, 48, 64]
+
+rsvd:
+  oversampling: [8, 16, 24]
+  power_iterations: [1, 2, 3]
+  seeds: [20260720]
+
+residual:
+  tolerances: [0.0]
+  norm_models: [frobenius]
+
+staging:
+  j2_values: [2, 3, 4]
+  forbid_j2_1: true
+
+priority_policy:
+  name: expected_q_gain_per_second_v1
+
+layers:
+  perron_weight_strategy: [all_ones, interval_power, inverse_row_sum]
+  coupling_policy: [uniform_full]
