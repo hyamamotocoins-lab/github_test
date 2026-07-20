@@ -47,6 +47,7 @@ certification_status = NOT_CERTIFIED
 | M4 | 実装・実行完了、数学境界で停止 | 全18ゲート PASS、`M4_COMPLETE / BLOCKED_MATH / NOT_CERTIFIED` |
 | M5 | 実装完了・Paperspace 実行可 | 8 handoff obligations 閉鎖 → live `one_step_certificate/` → `M5_acceptance.json` |
 | M6 | 実装・Paperspace 実行可 | LOCK 固定、`final_certificate/`、独立 verifier、`M6_acceptance.json` |
+| M7 | 実装・Paperspace 実行可 | Campaign A scheme search：`q_cert_upper<1` の独立検証済み scheme を探索 |
 
 M3 report は独立レビュー済みで、[audit/m3_accepted_parent.json](audit/m3_accepted_parent.json) に
 M3→M4 の受理根拠を固定しました。M4 の実装ゲートは完了し、derivative-only acceptance は
@@ -98,6 +99,14 @@ M6 は `notebooks/70_m6_multistep_certificate.ipynb` から実行します。凍
 
 ```text
 VALIDATED_RG_M6_RUN_ID=M6-20260720T061700Z-7c4e91a2b850
+```
+
+M7 は `notebooks/72_m7_certified_scheme_search.ipynb` から実行します。目的は
+`∃θ: q_cert_upper(θ)<1` を満たす独立検証済み scheme を見つけることです（設計:
+`M7_CERTIFIED_SCHEME_SEARCH_DESIGN`）。凍結 search ID:
+
+```text
+VALIDATED_RG_M7_RUN_ID=M7-20260720T074400Z-9f2a18c6d401
 ```
 
 現行 paperspace 設計は親 M5 one-step majorant を最終値として継承するため、親と同じ
