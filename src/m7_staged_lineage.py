@@ -533,9 +533,102 @@ def run_staged_lineage_from_package(
             'Package is not staged_executable: '
             + '; '.join(gate.get('staged_blocked_reasons') or [])
         )
-    m2_id = child_ids.get('M2')
+
+    from .m2_package_audit import write_package_m2_shared_audit
+    from .m2_shared_registry import (
+        BINDING_NEED,
+        BINDING_READY,
+        BINDING_WAITING,
+        MODE_STRICT,
+        heartbeat_reservation,
+        read_binding,
+        register_shared_m2_from_run,
+        reserve_shared_m2,
+        resolve_m2_binding,
+    )
+    from .m7_promotion import require_promote_for_canonical_m2
+
+    binding = resolve_m2_binding(
+        persistent_root=persistent_root,
+        project_root=project_root,
+        package_root=root,
+        j2_max=j2_max,
+    )
+    m2_id = binding.get('canonical_run_id') or (child_ids or {}).get('M2')
     if not isinstance(m2_id, str) or not m2_id.startswith('M2-'):
-        raise M7StagedLineageError('Package child_run_ids.M2 is invalid.')
+        raise M7StagedLineageError('Shared M2 canonical run id is invalid.')
+
+    child_ids = dict(child_ids)
+    child_ids['M2'] = m2_id
+    atomic_write_json(root / 'child_run_ids.json', child_ids)
+
+    if binding.get('state') == BINDING_READY:
+        record_run = Path(persistent_root) / 'runs' / m2_id
+        # Prefer registry canonical_run_root if present via lookup later; path by id.
+        audit = None
+        if rewrite_m2_audit:
+            audit = write_package_m2_shared_audit(
+                root,
+                run_root=record_run,
+                structural_key=str(binding.get('structural_key')),
+                proof_key=str(binding.get('proof_key')),
+                registry_record_sha256=binding.get('registry_record_sha256'),
+            )
+        dims = cutoff_dimension_payload(j2_max)
+        atomic_write_json(root / 'staged_progress.json', {
+            'm2_state': BINDING_READY,
+            'm2_binding': binding,
+            'm2_complete': True,
+            'm2_audit': {
+                'accepted_run_id': (audit or {}).get('accepted_run_id'),
+                'm2_parent_audit_path': (audit or {}).get('m2_parent_audit_path'),
+            } if audit else None,
+            'next_steps': {
+                'status': 'M2_REUSED_SHARED',
+                'next': [
+                    'Skip full M2; READY_SHARED binding',
+                    'Proceed to S0 / M3 with package-local M2 audit',
+                ],
+                'cutoff_dims': dims,
+            },
+            'generated_at': utc_now(),
+        })
+        return {
+            'status': 'M2_REUSED_SHARED',
+            'm2_session': {
+                'run_id': m2_id,
+                'm2_complete': True,
+                'run_root': str(record_run),
+            },
+            'audit_rewritten': audit is not None,
+            'package_root': str(root),
+            'm2_binding': binding,
+        }
+
+    if binding.get('state') == BINDING_WAITING:
+        raise M7StagedLineageError(
+            'WAITING_FOR_CANONICAL_M2: another owner holds the reservation; '
+            'do not start a second full M2.'
+        )
+
+    if binding.get('state') != BINDING_NEED:
+        raise M7StagedLineageError(
+            f'Cannot start M2 from binding state={binding.get("state")!r}'
+        )
+
+    require_promote_for_canonical_m2(root)
+    structural_key = str(binding['structural_key'])
+    proof_key = str(binding['proof_key'])
+    reserve_shared_m2(
+        persistent_root,
+        structural_key,
+        proof_key,
+        owner_id=root.name,
+        canonical_run_id=m2_id,
+    )
+    heartbeat_reservation(
+        persistent_root, structural_key, proof_key, owner_id=root.name,
+    )
 
     summary = run_staged_m2_session(
         persistent_root=persistent_root,
@@ -547,17 +640,33 @@ def run_staged_lineage_from_package(
     )
     audit = None
     if summary.get('m2_complete') and rewrite_m2_audit:
-        audit = write_child_m2_acceptance_audit(
-            project_root, run_root=Path(summary['run_root']),
+        register_shared_m2_from_run(
+            persistent_root,
+            Path(summary['run_root']),
+            project_root=project_root,
+            registration_mode=MODE_STRICT,
+            allow_overwrite=True,
         )
-        # Materialize M3 overrides already present; stamp next-step hint.
+        binding = resolve_m2_binding(
+            persistent_root=persistent_root,
+            project_root=project_root,
+            package_root=root,
+            j2_max=j2_max,
+        )
+        audit = write_package_m2_shared_audit(
+            root,
+            run_root=Path(summary['run_root']),
+            structural_key=str(binding.get('structural_key')),
+            proof_key=str(binding.get('proof_key')),
+            registry_record_sha256=binding.get('registry_record_sha256'),
+        )
         dims = cutoff_dimension_payload(j2_max)
         next_steps = {
-            'status': 'M2_COMPLETE_AUDIT_REWRITTEN',
+            'status': 'M2_COMPLETE_PACKAGE_AUDIT',
             'next': [
-                'create_or_resume_m3 with m3_config_overrides.json',
-                'ACCEPT M3 → rewrite audit/m3_accepted_parent.json',
-                'continue M4→M6 with child_run_ids',
+                'shared M2 registered under structural_key/proof_key',
+                'other candidates with same proof key become READY_SHARED',
+                'create_or_resume_m3 with package audits/m2_shared_parent.json',
             ],
             'cutoff_dims': dims,
             'effective_projected_rank': effective_projected_rank(
@@ -567,8 +676,10 @@ def run_staged_lineage_from_package(
         }
         atomic_write_json(root / 'staged_progress.json', {
             'm2_session': summary,
+            'm2_binding': binding,
             'm2_audit': {
                 'accepted_run_id': audit.get('accepted_run_id'),
+                'm2_parent_audit_path': audit.get('m2_parent_audit_path'),
                 'checkpoint_index': audit.get('checkpoint_index'),
             },
             'next_steps': next_steps,
@@ -576,10 +687,11 @@ def run_staged_lineage_from_package(
     else:
         atomic_write_json(root / 'staged_progress.json', {
             'm2_session': summary,
+            'm2_binding': binding,
             'm2_complete': bool(summary.get('m2_complete')),
             'note': (
                 'Resume with the same execute_lineage.py --live --staged '
-                'until M2_COMPLETE.'
+                'until M2_COMPLETE (canonical shared run).'
             ),
             'generated_at': utc_now(),
         })
@@ -591,4 +703,5 @@ def run_staged_lineage_from_package(
         'm2_session': summary,
         'audit_rewritten': audit is not None,
         'package_root': str(root),
+        'm2_binding': binding,
     }

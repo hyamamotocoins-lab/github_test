@@ -142,3 +142,18 @@ class M2Config:
 
     def config_hash(self) -> str:
         return hashlib.sha256(self.canonical_json().encode('utf-8')).hexdigest()
+
+    def semantic_compatibility_payload(self) -> dict[str, Any]:
+        """Fields that define the mathematical M2 problem (not execution layout).
+
+        Excludes: sector_batch_size, seed, session schedule, shard/retry policy.
+        Dependency audit: if a future field changes all_link_star_keys,
+        fusion tree, orientations, magnetic basis, symmetry orbit, armillary
+        reconstruction, or expected M2 gate count, add it here.
+        """
+        return {
+            'j2_max': self.j2_max,
+            'leg_count': self.leg_count,
+            'orientations': list(self.orientations),
+            'exact_decimal_digits': self.exact_decimal_digits,
+        }

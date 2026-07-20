@@ -68,28 +68,62 @@ def m2_status(
     package_root: Path,
     persistent_root: Path,
 ) -> dict[str, Any]:
-    child_ids = read_json(Path(package_root) / 'child_run_ids.json')
-    if not isinstance(child_ids, dict) or not child_ids.get('M2'):
+    from .m2_shared_registry import (
+        BINDING_READY,
+        canonical_m2_run_id_for_package,
+        read_binding,
+        verify_shared_m2,
+    )
+
+    binding = read_binding(package_root)
+    m2_run_id = canonical_m2_run_id_for_package(package_root)
+    if not m2_run_id:
         return {
             'ready': False,
             'm2_run_id': None,
-            'reason': 'child_run_ids.M2 missing',
+            'reason': 'M2 binding / child_run_ids.M2 missing',
+            'm2_binding': binding,
         }
-    m2_run_id = str(child_ids['M2'])
     progress = inspect_staged_m2_progress(persistent_root, run_id=m2_run_id)
     acceptance = (
         Path(persistent_root) / 'runs' / m2_run_id / 'reports' / 'M2_acceptance.json'
     )
-    ready = bool(progress.get('m2_complete')) and acceptance.is_file()
-    if acceptance.is_file():
-        acc = read_json(acceptance)
-        if isinstance(acc, dict) and acc.get('status') not in {None, 'PASS'}:
-            ready = False
+    ready = False
+    if isinstance(binding, dict) and binding.get('state') == BINDING_READY:
+        ready = acceptance.is_file()
+        if ready and binding.get('structural_key') and binding.get('proof_key'):
+            try:
+                verify_shared_m2(
+                    persistent_root,
+                    str(binding['structural_key']),
+                    str(binding['proof_key']),
+                    require_source_match=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    'ready': False,
+                    'm2_run_id': m2_run_id,
+                    'progress': progress,
+                    'm2_binding': binding,
+                    'reason': f'shared M2 verify failed: {exc}',
+                }
+    else:
+        # Legacy packages without READY_SHARED binding.
+        ready = bool(progress.get('m2_complete')) and acceptance.is_file()
+        if acceptance.is_file():
+            acc = read_json(acceptance)
+            if isinstance(acc, dict) and acc.get('status') not in {None, 'PASS'}:
+                ready = False
     return {
         'ready': ready,
         'm2_run_id': m2_run_id,
         'progress': progress,
         'acceptance_path': str(acceptance) if acceptance.is_file() else None,
+        'm2_binding': binding,
+        'm2_state': (binding or {}).get('state') if isinstance(binding, dict) else None,
+        'shared': (
+            isinstance(binding, dict) and binding.get('state') == BINDING_READY
+        ),
     }
 
 
@@ -233,6 +267,7 @@ def ensure_materialized(
     parent_j2_max: int = 1,
     max_executable_j2_max: int = 2,
     max_staged_j2_max: int = 2,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Materialize package if missing; return MANIFEST-like dict."""
     candidate_id = str(
@@ -244,6 +279,24 @@ def ensure_materialized(
         raise M7CandidateQueueError('candidate_id missing for materialize.')
     package = package_root_for(search_root, candidate_id)
     if (package / 'MANIFEST.json').is_file():
+        # Refresh M2 binding against current registry.
+        scheme = read_json(package / 'scheme.json')
+        j2_max = int((scheme or {}).get('j2_max', 2)) if isinstance(scheme, dict) else 2
+        from .m2_shared_registry import resolve_m2_binding
+        persist = Path(search_root).resolve().parent.parent
+        if project_root is not None:
+            binding = resolve_m2_binding(
+                persistent_root=persist,
+                project_root=project_root,
+                package_root=package,
+                j2_max=j2_max,
+            )
+            child_ids = read_json(package / 'child_run_ids.json')
+            if isinstance(child_ids, dict) and binding.get('canonical_run_id'):
+                child_ids = dict(child_ids)
+                child_ids['M2'] = str(binding['canonical_run_id'])
+                from .common import atomic_write_json
+                atomic_write_json(package / 'child_run_ids.json', child_ids)
         manifest = read_json(package / 'MANIFEST.json')
         if isinstance(manifest, dict):
             return manifest
@@ -259,6 +312,8 @@ def ensure_materialized(
         parent_j2_max=parent_j2_max,
         max_executable_j2_max=max_executable_j2_max,
         max_staged_j2_max=max_staged_j2_max,
+        persistent_root=Path(search_root).resolve().parent.parent,
+        project_root=project_root,
     )
 
 

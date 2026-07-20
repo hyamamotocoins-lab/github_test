@@ -246,6 +246,7 @@ def build_s3_lineage_plan(
     parent_m6_run_id: str,
     search_run_id: str,
     parent_j2_max: int = 1,
+    m2_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scheme = candidate.get('scheme') or {}
     j2_max = int(scheme.get('j2_max', parent_j2_max))
@@ -253,11 +254,31 @@ def build_s3_lineage_plan(
     block_geometry = str(scheme.get('block_geometry', 'current'))
     digest = str(candidate.get('candidate_id', 'CAND')).replace('CAND-', '')[:12]
     tag = search_run_id[3:11]
-    m2_id = f'M2-{tag}S3-{digest}'
+    # M3–M6 remain candidate-specific; M2 is shared via compatibility key.
     m3_id = f'M3-{tag}S3-{digest}'
     m4_id = f'M4-{tag}S3-{digest}'
     m5_id = f'M5-{tag}S3-{digest}'
     m6_id = f'M6-{tag}S3-{digest}'
+    binding = dict(m2_binding or {})
+    m2_state = str(binding.get('state') or 'UNRESOLVED')
+    m2_mode = str(binding.get('mode') or binding.get('M2_mode') or 'NEED_CANONICAL_M2')
+    m2_key = binding.get('structural_key') or binding.get('M2_compatibility_key')
+    proof_key = binding.get('proof_key')
+    m2_canonical = binding.get('canonical_run_id') or binding.get('M2_canonical_run_id')
+    child_run_ids: dict[str, str] = {
+        'M3': m3_id,
+        'M4': m4_id,
+        'M5': m5_id,
+        'M6': m6_id,
+    }
+    if isinstance(m2_canonical, str) and m2_canonical.startswith('M2-'):
+        child_run_ids['M2'] = m2_canonical
+    reused = ['M1', 'M0']
+    invalidated = ['M3', 'M4', 'M5', 'M6']
+    if m2_state == 'READY_SHARED' or m2_mode in {'REUSE_SHARED', 'READY_SHARED'}:
+        reused = ['M2', 'M1', 'M0']
+    else:
+        invalidated = ['M2', 'M3', 'M4', 'M5', 'M6']
     execution_blocked = False  # dims unlocked; resource_gate decides live execute
     return {
         'schema_version': 1,
@@ -273,36 +294,37 @@ def build_s3_lineage_plan(
             'block_geometry': block_geometry,
             'seed': int(scheme.get('seed', 20260720)),
         },
-        'child_run_ids': {
-            'M2': m2_id,
-            'M3': m3_id,
-            'M4': m4_id,
-            'M5': m5_id,
-            'M6': m6_id,
-        },
-        'invalidated_nodes': ['M2', 'M3', 'M4', 'M5', 'M6'],
-        'reused_artifacts': ['M1', 'M0'],
+        'M2_mode': m2_mode,
+        'M2_state': m2_state,
+        'M2_structural_key': m2_key,
+        'M2_proof_key': proof_key,
+        'M2_compatibility_key': m2_key,
+        'M2_canonical_run_id': m2_canonical,
+        'child_run_ids': child_run_ids,
+        'invalidated_nodes': invalidated,
+        'reused_artifacts': reused,
         'execution_blocked_by_math_lock': execution_blocked,
         'execution_steps': [
             'HUMAN REVIEW or lineage_mode=auto approval stamp',
             'm7_auto_execute.materialize_s3_lineage_package + dry_run',
-            'If resource_gate.executable: instant create_or_resume_m2',
+            'Resolve shared M2 (REUSE_SHARED) or run canonical shared M2 once',
             'If resource_gate.staged_executable: m7_staged_lineage '
-            'sector-batched M2 (resume across sessions)',
-            'ACCEPT M2 → rewrite audit/m2_accepted_parent.json',
+            'sector-batched shared M2 (resume across sessions)',
+            'ACCEPT shared M2 → write package audits/m2_shared_parent.json',
             'create_or_resume_m3 with derived sector_count/operator_dimension',
-            'ACCEPT M3 → M4 → M5 → M6 child lineage (non-paperspace run IDs)',
+            'ACCEPT M3 → M4 → M5 → M6 child lineage (candidate-specific IDs)',
             'Feed child final_certificate into M7 independent verifier',
         ],
         'notes': (
-            'S3 requires a new M2→M6 lineage under LOCK. '
+            'S3 M2 is shared by structural_key+proof_key across candidates. '
             'Configs accept j2_max in [1,4] with derived dims; '
-            'j2=1: instant live; j2=2: staged sector-batched M2 '
-            '(execute_lineage.py --live --staged); higher cutoffs gated. '
+            'j2=1: instant live; j2=2: staged sector-batched shared M2; '
+            'higher cutoffs gated. '
             'q_cert>=1 on the child remains certificate failure only.'
         ),
         'generated_at': utc_now(),
     }
+
 
 
 def apply_s3_cutoff_model(

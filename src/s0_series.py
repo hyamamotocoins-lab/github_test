@@ -49,16 +49,44 @@ def build_m3_config_for_package(
     child_ids = read_json(Path(package_root) / 'child_run_ids.json')
     if not isinstance(over, dict) or not isinstance(child_ids, dict):
         raise S0SeriesError('Package missing m3_config_overrides or child_run_ids.')
-    m2_run_id = str(child_ids.get('M2') or '')
+    from .m2_package_audit import read_package_m2_audit, write_package_m2_shared_audit
+    from .m2_shared_registry import BINDING_READY, canonical_m2_run_id_for_package, read_binding
+    m2_run_id = canonical_m2_run_id_for_package(package_root) or str(
+        child_ids.get('M2') or ''
+    )
     if not m2_run_id:
-        raise S0SeriesError('child_run_ids.M2 missing.')
-    audit_path = Path(project_root) / 'audit' / 'm2_accepted_parent.json'
-    audit = read_json(audit_path) if audit_path.is_file() else None
-    if not isinstance(audit, dict) or audit.get('accepted_run_id') != m2_run_id:
-        audit = write_child_m2_acceptance_audit(
-            project_root,
-            run_root=Path(persistent_root) / 'runs' / m2_run_id,
-        )
+        raise S0SeriesError('Shared/canonical M2 run id missing.')
+    binding = read_binding(package_root)
+    if isinstance(binding, dict) and binding.get('state') != BINDING_READY:
+        # Allow legacy packages with acceptance on disk.
+        pass
+    if child_ids.get('M2') != m2_run_id:
+        child_ids = dict(child_ids)
+        child_ids['M2'] = m2_run_id
+        from .common import atomic_write_json
+        atomic_write_json(Path(package_root) / 'child_run_ids.json', child_ids)
+
+    audit = read_package_m2_audit(package_root)
+    if audit is None:
+        # Prefer package-local audit; fall back to writing from shared run.
+        sk = (binding or {}).get('structural_key') if isinstance(binding, dict) else None
+        pk = (binding or {}).get('proof_key') if isinstance(binding, dict) else None
+        if sk and pk:
+            audit = write_package_m2_shared_audit(
+                package_root,
+                run_root=Path(persistent_root) / 'runs' / m2_run_id,
+                structural_key=str(sk),
+                proof_key=str(pk),
+                registry_record_sha256=(
+                    binding.get('registry_record_sha256')
+                    if isinstance(binding, dict) else None
+                ),
+            )
+        else:
+            audit = write_child_m2_acceptance_audit(
+                project_root,
+                run_root=Path(persistent_root) / 'runs' / m2_run_id,
+            )
     base = asdict(M3Config())
     base.update({
         'parent_run_id': audit['accepted_run_id'],

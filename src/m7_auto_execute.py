@@ -147,6 +147,8 @@ def materialize_s3_lineage_package(
     parent_j2_max: int = 1,
     max_executable_j2_max: int = 2,
     max_staged_j2_max: int = 2,
+    persistent_root: Path | None = None,
+    project_root: Path | None = None,
 ) -> dict[str, Any]:
     """Write an executable workspace for one S3 candidate."""
     scheme = candidate.get('scheme') or {}
@@ -158,6 +160,31 @@ def materialize_s3_lineage_package(
         max_executable_j2_max=max_executable_j2_max,
         max_staged_j2_max=max_staged_j2_max,
     )
+    persist = Path(persistent_root) if persistent_root is not None else Path(search_root).resolve().parent.parent
+    from .m2_shared_registry import BINDING_UNRESOLVED, resolve_m2_for_package, write_binding
+    out = search_root / 'auto_execute' / str(candidate.get('candidate_id'))
+    out.mkdir(parents=True, exist_ok=True)
+    if project_root is not None:
+        binding = resolve_m2_for_package(
+            persistent_root=persist,
+            j2_max=j2_max,
+            project_root=project_root,
+            package_root=out,
+        )
+    else:
+        binding = write_binding(out, {
+            'schema_version': 2,
+            'structural_key': None,
+            'proof_key': None,
+            'state': BINDING_UNRESOLVED,
+            'mode': None,
+            'canonical_run_id': None,
+            'registry_record_sha256': None,
+            'acceptance_sha256': None,
+            'verified_at': None,
+            'note': 'Resolve with project_root to compute structural/proof keys',
+            'certification_status': 'NOT_CERTIFIED',
+        })
     plan = build_s3_lineage_plan(
         {
             'candidate_id': candidate.get('candidate_id'),
@@ -167,6 +194,7 @@ def materialize_s3_lineage_package(
         parent_m6_run_id=parent_m6_run_id,
         search_run_id=search_run_id,
         parent_j2_max=parent_j2_max,
+        m2_binding=binding,
     )
     # Clear math-lock flag in materialized plan: dims are now configurable;
     # resource_gate decides live execute.
@@ -174,12 +202,11 @@ def materialize_s3_lineage_package(
     plan['resource_gate'] = gate
     plan['cutoff_dims'] = cutoff_dimension_payload(j2_max)
 
-    out = search_root / 'auto_execute' / str(candidate.get('candidate_id'))
-    out.mkdir(parents=True, exist_ok=True)
     atomic_write_json(out / 'rigorous_lineage.json', plan)
     atomic_write_json(out / 'scheme.json', scheme)
     atomic_write_json(out / 'resource_gate.json', gate)
     atomic_write_json(out / 'child_run_ids.json', plan['child_run_ids'])
+    atomic_write_json(out / 'm2_binding.json', binding)
 
     dims = cutoff_dimension_payload(j2_max)
     m3_overrides = {
@@ -214,6 +241,7 @@ def materialize_s3_lineage_package(
         'package_root': str(out),
         'resource_gate': gate,
         'child_run_ids': plan['child_run_ids'],
+        'm2_binding': binding,
         'generated_at': utc_now(),
         'next_command': f'python {out / "execute_lineage.py"} --dry-run',
     }

@@ -36,4 +36,5 @@ NOTEBOOKS: Final[dict[str, str]] = {
     'M6': '81_m6_production_gate.ipynb',
     'QUEUE': '82_campaign_c_candidate_queue.ipynb',
     'S0_SERIES': '83_s0_rank_sweep_series.ipynb',
+    'SHARED_M2': '84_shared_m2_registry.ipynb',
 }
