@@ -266,7 +266,11 @@ def _verify_regression(report: dict[str, Any]) -> dict[str, float]:
     }
 
 
-def _load_derivative_tensors(checkpoint: Path) -> dict[str, np.ndarray]:
+def _load_derivative_tensors(
+    checkpoint: Path,
+    *,
+    projected_rank: int | None = None,
+) -> dict[str, np.ndarray]:
     loaded = TensorShardStore(64 * 1024 * 1024).load(checkpoint / 'tensors')
     required = {
         'normalized_primal',
@@ -275,11 +279,20 @@ def _load_derivative_tensors(checkpoint: Path) -> dict[str, np.ndarray]:
     if not required <= set(loaded):
         raise M5ParentError('Accepted M4 derivative checkpoint is incomplete.')
     result: dict[str, np.ndarray] = {}
+    inferred_rank: int | None = None
     for name in sorted(required):
         value = np.asarray(loaded[name])
-        if value.shape != (16, 16) or not np.isfinite(value).all():
+        if value.ndim != 2 or value.shape[0] != value.shape[1]:
+            raise M5ParentError(f'Accepted M4 derivative tensor is invalid: {name}')
+        if inferred_rank is None:
+            inferred_rank = int(value.shape[0])
+        if value.shape != (inferred_rank, inferred_rank) or not np.isfinite(value).all():
             raise M5ParentError(f'Accepted M4 derivative tensor is invalid: {name}')
         result[name] = value.copy()
+    if projected_rank is not None and inferred_rank != int(projected_rank):
+        raise M5ParentError(
+            f'M4 derivative rank {inferred_rank} != expected {projected_rank}.'
+        )
     return result
 
 

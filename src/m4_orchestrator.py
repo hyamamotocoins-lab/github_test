@@ -242,7 +242,14 @@ class M4Orchestrator:
 
     @staticmethod
     def _torch_regroup(value: torch.Tensor) -> torch.Tensor:
-        return value.reshape(4, 4, 4, 4).permute(0, 2, 1, 3).reshape(16, 16)
+        if value.shape[0] != value.shape[1]:
+            raise ValueError('M4 GPU regrouping requires a square matrix.')
+        leg = int(round(float(value.shape[0]) ** 0.5))
+        if leg * leg != int(value.shape[0]):
+            raise ValueError('M4 GPU regrouping dimension must be a perfect square.')
+        return value.reshape(leg, leg, leg, leg).permute(0, 2, 1, 3).reshape(
+            value.shape
+        )
 
     def _pipeline_result(self) -> dict[str, Any]:
         projected = _dual_from_tensors(self.tensors, 'projected')

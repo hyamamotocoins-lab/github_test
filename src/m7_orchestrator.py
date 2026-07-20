@@ -20,16 +20,28 @@ from .common import (
 from .exact_arithmetic import fraction_from_payload
 from .m5_package import make_contractive_fixture_inputs
 from .m6_status import M6_COMPLETE
-from .m7_config import campaign_a_search_space, default_m7_config, M7Config
+from .m7_config import (
+    default_m7_config,
+    search_space_for_campaign,
+    M7Config,
+)
 from .m7_diagnosis import diagnose_m6_package
 from .m7_generator import (
     generate_campaign_a_candidates,
+    generate_campaign_b_candidates,
     generate_fixture_contractive_candidate,
+    generate_fixture_s2_cert_candidate,
     scheme_hash,
 )
 from .m7_independent_verifier import (
     M7IndependentVerifierError,
     verify_accepted_scheme,
+)
+from .m7_lineage import (
+    build_s2_lineage_plan,
+    evaluate_s2_fixture_residual,
+    screen_s2_candidate,
+    write_lineage_plan,
 )
 from .m7_replay import evaluate_candidate_rigorous
 from .m7_status import (
@@ -39,7 +51,8 @@ from .m7_status import (
     M7_COMPLETE,
     M7_DIAGNOSIS_COMPLETE,
     M7_INITIALIZED,
-    M7_RESOURCE_LIMIT_REACHED,
+    M7_LINEAGE_PLANNED,
+    M7_RUN_ID_CAMPAIGN_B,
     M7_RUN_ID_FROZEN,
     M7_SEARCHING,
     M7_SEARCH_SPACE_EXHAUSTED,
@@ -119,15 +132,19 @@ class M7Orchestrator:
         }
 
     def _write_lock(self, parent_info: dict[str, Any]) -> dict[str, Any]:
+        space = search_space_for_campaign(self.config.campaign)
         lock = {
             'schema_version': 1,
             'search_run_id': self.config.run_id,
             'parent_m6_run_id': self.config.parent_m6_run_id,
+            'campaign': self.config.campaign,
+            'lineage_mode': self.config.lineage_mode,
             'parent': parent_info,
-            'search_space': campaign_a_search_space(),
+            'search_space': space,
             'budget': {
                 'max_candidates_total': self.config.max_candidates_total,
                 'max_rigorous_replays': self.config.max_rigorous_replays,
+                'max_lineage_replays': self.config.max_lineage_replays,
                 'stop_on_first_certified': self.config.stop_on_first_certified,
                 'required_q_cert_upper': self.config.required_q_cert_upper,
             },
@@ -138,9 +155,7 @@ class M7Orchestrator:
             'code_tree_sha256': hash_tree(self.project_root / 'src', suffixes=('.py',)),
         }
         atomic_write_json(self.search_root / 'LOCK.json', lock)
-        atomic_write_json(
-            self.search_root / 'search_space.lock.json', campaign_a_search_space(),
-        )
+        atomic_write_json(self.search_root / 'search_space.lock.json', space)
         return lock
 
     def _append_event(self, event: dict[str, Any]) -> None:
@@ -257,6 +272,84 @@ class M7Orchestrator:
         final_root.mkdir(parents=True)
 
         scheme = eval_result.get('scheme') or {}
+        if scheme.get('majorant_policy') == 'S2_RANK_RESIDUAL_LINEAGE':
+            from .m7_lineage import apply_s2_residual_model
+            from .certificate import (
+                collatz_certificate,
+                nonnegative_interval_matrix,
+                positive_rational_vector,
+            )
+            parent_influence = read_json(package_root / 'final_influence_matrix.json')
+            labels = list(parent_influence['labels'])
+            shrunk = apply_s2_residual_model(
+                [list(row) for row in parent_influence['entries']],
+                parent_rank=self.config.parent_rank,
+                target_rank=int(scheme.get('target_rank', self.config.parent_rank)),
+                oversampling=int(scheme.get('oversampling', 16)),
+                power_iterations=int(scheme.get('power_iterations', 2)),
+            )
+            serialized_rows = [[cell.serialize() for cell in row] for row in shrunk]
+            outside = read_json(package_root / 'final_bound.json').get(
+                'outside_matrix_tail'
+            )
+            perron_vals = _perron_for_strategy(
+                str(scheme.get('perron_weight_strategy', 'all_ones')),
+                labels,
+                shrunk,
+            )
+            vector = positive_rational_vector(perron_vals, labels)
+            matrix = nonnegative_interval_matrix(
+                [[str(cell.hi) for cell in row] for row in shrunk],
+                labels,
+            )
+            # Prefer bound from eval when present.
+            bound_payload = eval_result.get('bound_payload')
+            if not isinstance(bound_payload, dict) or not bound_payload:
+                bound_payload = collatz_certificate(
+                    matrix, vector, outside_matrix_tail=outside,
+                ).payload()
+            final_root = self.search_root / 'final_package'
+            if final_root.exists():
+                shutil.rmtree(final_root)
+            final_root.mkdir(parents=True)
+            atomic_write_json(final_root / 'final_influence_matrix.json', {
+                'schema_version': 1,
+                'labels': labels,
+                'entries': serialized_rows,
+            })
+            atomic_write_json(final_root / 'perron_vector.json', vector.payload())
+            atomic_write_json(final_root / 'final_bound.json', bound_payload)
+            atomic_write_json(final_root / 'accepted_scheme.json', {
+                'candidate_id': eval_result.get('candidate_id'),
+                'scheme_hash': eval_result.get('scheme_hash'),
+                'scheme': scheme,
+                'q_cert_upper': eval_result.get('q_cert_upper'),
+                'notes': eval_result.get('notes'),
+                'lineage_mode': 'fixture_residual',
+            })
+            atomic_write_json(final_root / 'M7_acceptance.json', {
+                'schema_version': 1,
+                'milestone': 'M7',
+                'phase': M7_COMPLETE,
+                'status': CERTIFIED_SCHEME_FOUND,
+                'campaign': 'B',
+                'search_run_id': self.config.run_id,
+                'parent_m6_run_id': self.config.parent_m6_run_id,
+                'candidate_id': eval_result.get('candidate_id'),
+                'scheme_hash': eval_result.get('scheme_hash'),
+                'q_cert_upper': eval_result.get('q_cert_upper'),
+                'q_cert_lower': eval_result.get('q_cert_lower'),
+                'independent_verifier': 'PENDING',
+                'generated_at': utc_now(),
+                'mathematical_interpretation': {
+                    'scope': (
+                        'Fixture residual-model certificate for Campaign B '
+                        'controller tests only; not a live M3→M6 lineage.'
+                    ),
+                },
+            })
+            return final_root
+
         parent_influence = read_json(package_root / 'final_influence_matrix.json')
         labels = list(parent_influence['labels'])
         entries: list[list[Any]] = [list(row) for row in parent_influence['entries']]
@@ -291,9 +384,6 @@ class M7Orchestrator:
         })
         atomic_write_json(final_root / 'perron_vector.json', vector.payload())
         atomic_write_json(final_root / 'final_bound.json', eval_result['bound_payload'])
-        if isinstance(outside, dict):
-            # Ensure bound outside matches coupling split when present in payload.
-            pass
         atomic_write_json(final_root / 'accepted_scheme.json', {
             'candidate_id': eval_result.get('candidate_id'),
             'scheme_hash': eval_result.get('scheme_hash'),
@@ -382,6 +472,20 @@ class M7Orchestrator:
                     parent_scheme_hash=parent_scheme_hash,
                 )
             ]
+        elif self.config.campaign == 'B':
+            candidates = generate_campaign_b_candidates(
+                parent_m6_run_id=self.config.parent_m6_run_id,
+                parent_scheme_hash=parent_scheme_hash,
+                limit=self.config.max_candidates_total,
+            )
+            if self.config.mode == 'cpu_fixture_campaign_b':
+                candidates = [
+                    generate_fixture_s2_cert_candidate(
+                        parent_m6_run_id=self.config.parent_m6_run_id,
+                        parent_scheme_hash=parent_scheme_hash,
+                    ),
+                    *candidates,
+                ]
         else:
             candidates = generate_campaign_a_candidates(
                 parent_m6_run_id=self.config.parent_m6_run_id,
@@ -399,13 +503,24 @@ class M7Orchestrator:
 
         self._append_event({
             'event': M7_SEARCHING,
+            'campaign': self.config.campaign,
             'n_candidates': len(candidates),
             'at': utc_now(),
         })
 
         ranking: list[dict[str, Any]] = []
+        screening_rows: list[dict[str, Any]] = []
+        lineage_plans: list[dict[str, Any]] = []
         accepted: dict[str, Any] | None = None
         rigorous_count = 0
+        lineage_count = 0
+
+        parent_q_float = 2.5
+        if isinstance(diagnosis.get('q_cert_upper'), str):
+            try:
+                parent_q_float = float(diagnosis['q_cert_upper'])
+            except ValueError:
+                parent_q_float = 2.5
 
         for candidate in candidates:
             cand_dir = self.search_root / 'candidates' / candidate['candidate_id']
@@ -415,39 +530,142 @@ class M7Orchestrator:
                 'status': 'LOCKED_FOR_RIGOROUS_REPLAY',
             })
             atomic_write_json(cand_dir / 'scheme.json', candidate['scheme'])
+
+            if self.config.campaign == 'B':
+                screen = screen_s2_candidate(
+                    candidate,
+                    parent_q_upper=parent_q_float,
+                    parent_rank=self.config.parent_rank,
+                )
+                atomic_write_json(cand_dir / 'screening.json', screen)
+                screening_rows.append(screen)
+                plan = build_s2_lineage_plan(
+                    candidate,
+                    parent_m6_run_id=self.config.parent_m6_run_id,
+                    search_run_id=self.config.run_id,
+                )
+                write_lineage_plan(cand_dir / 'rigorous_lineage.json', plan)
+                lineage_plans.append(plan)
+
             if rigorous_count >= self.config.max_rigorous_replays:
                 break
+            if (
+                self.config.campaign == 'B'
+                and self.config.lineage_mode == 'plan_only'
+            ):
+                # Paperspace default: emit plans/screens without claiming CERTIFIED.
+                ranking.append({
+                    'candidate_id': candidate['candidate_id'],
+                    'q_cert_upper': screen.get('estimated_q'),
+                    'q_cert_upper_rational': None,
+                    'certified': False,
+                    'change_class': candidate['change_class'],
+                    'scheme': candidate['scheme'],
+                    'screen_status': screen.get('screen_status'),
+                    'lineage_mode': 'plan_only',
+                })
+                rigorous_count += 1
+                continue
+
+            if (
+                self.config.campaign == 'B'
+                and lineage_count >= self.config.max_lineage_replays
+                and self.config.lineage_mode != 'fixture_residual'
+            ):
+                break
+
             rigorous_count += 1
-            result = evaluate_candidate_rigorous(package_root, candidate)
+            if (
+                self.config.campaign == 'B'
+                and self.config.lineage_mode == 'fixture_residual'
+            ):
+                lineage_count += 1
+                result = evaluate_s2_fixture_residual(
+                    package_root,
+                    candidate,
+                    parent_rank=self.config.parent_rank,
+                )
+            elif (
+                self.config.campaign == 'B'
+                and self.config.lineage_mode == 'execute'
+            ):
+                lineage_count += 1
+                # Full GPU M3→M6 is out-of-band; record plan and fail closed.
+                result = {
+                    'schema_version': 1,
+                    'candidate_id': candidate.get('candidate_id'),
+                    'scheme_hash': candidate.get('scheme_hash'),
+                    'change_class': candidate.get('change_class'),
+                    'scheme': candidate.get('scheme'),
+                    'notes': (
+                        'lineage_mode=execute requires operator-driven M3→M6 '
+                        'rebuild using rigorous_lineage.json; automatic GPU '
+                        'orchestration is not enabled in this controller build.'
+                    ),
+                    'q_cert_lower': None,
+                    'q_cert_upper': None,
+                    'q_cert_upper_rational': {
+                        'numerator_hex': '1',
+                        'denominator_hex': '1',
+                    },
+                    'certified': False,
+                    'scheme_result': SCHEME_REJECTED,
+                    'lineage_mode': 'execute',
+                    'bound_payload': {},
+                }
+            else:
+                result = evaluate_candidate_rigorous(package_root, candidate)
+
             atomic_write_json(cand_dir / 'rigorous_result.json', result)
             ranking.append({
                 'candidate_id': candidate['candidate_id'],
-                'q_cert_upper': result['q_cert_upper'],
-                'q_cert_upper_rational': result['q_cert_upper_rational'],
-                'certified': result['certified'],
+                'q_cert_upper': result.get('q_cert_upper'),
+                'q_cert_upper_rational': result.get('q_cert_upper_rational'),
+                'certified': result.get('certified'),
                 'change_class': candidate['change_class'],
                 'scheme': candidate['scheme'],
+                'lineage_mode': self.config.lineage_mode,
             })
             self._append_event({
                 'event': 'CANDIDATE_EVALUATED',
                 'candidate_id': candidate['candidate_id'],
-                'certified': result['certified'],
-                'q_cert_upper': result['q_cert_upper'],
+                'certified': result.get('certified'),
+                'q_cert_upper': result.get('q_cert_upper'),
                 'at': utc_now(),
             })
-            if result['certified']:
+            if result.get('certified'):
                 accepted = result
                 if self.config.stop_on_first_certified:
                     break
 
-        ranking_sorted = sorted(
-            ranking,
-            key=lambda row: fraction_from_payload(row['q_cert_upper_rational']),
-        )
+        def _rank_key(row: dict[str, Any]) -> Fraction:
+            rational = row.get('q_cert_upper_rational')
+            if isinstance(rational, dict) and rational.get('numerator_hex'):
+                return fraction_from_payload(rational)
+            raw = row.get('q_cert_upper')
+            if raw is None:
+                return Fraction(10**9)
+            try:
+                return Fraction.from_float(float(raw))
+            except (TypeError, ValueError):
+                return Fraction(10**9)
+
+        ranking_sorted = sorted(ranking, key=_rank_key)
         atomic_write_json(reports / 'candidate_ranking.json', {
             'schema_version': 1,
+            'campaign': self.config.campaign,
             'ranking': ranking_sorted,
         })
+        if screening_rows:
+            atomic_write_json(reports / 'screening_summary.json', {
+                'schema_version': 1,
+                'rows': screening_rows,
+            })
+        if lineage_plans:
+            atomic_write_json(reports / 'lineage_plans.json', {
+                'schema_version': 1,
+                'plans': lineage_plans,
+            })
         best = ranking_sorted[0] if ranking_sorted else None
         atomic_write_json(reports / 'best_so_far.json', best or {})
 
@@ -464,10 +682,10 @@ class M7Orchestrator:
             acceptance['independent_verifier'] = 'PASS'
             acceptance['independent_q_cert_upper'] = independent['q_cert_upper']
             atomic_write_json(final_root / 'M7_acceptance.json', acceptance)
-            # Mirror into project audit + ordinary runs reports pointer.
             (self.project_root / 'audit').mkdir(parents=True, exist_ok=True)
             atomic_write_json(self.project_root / 'audit' / 'm7_accepted_scheme.json', {
                 'search_run_id': self.config.run_id,
+                'campaign': self.config.campaign,
                 'status': CERTIFIED_SCHEME_FOUND,
                 'candidate_id': accepted.get('candidate_id'),
                 'scheme_hash': accepted.get('scheme_hash'),
@@ -477,22 +695,56 @@ class M7Orchestrator:
             })
             search_status = M7_CERTIFIED_SCHEME_FOUND
             phase = M7_COMPLETE
-        else:
-            search_status = M7_SEARCH_SPACE_EXHAUSTED
+        elif (
+            self.config.campaign == 'B'
+            and self.config.lineage_mode == 'plan_only'
+            and lineage_plans
+        ):
+            search_status = M7_LINEAGE_PLANNED
             phase = M7_COMPLETE
             atomic_write_json(reports / 'M7_acceptance.json', {
                 'schema_version': 1,
                 'milestone': 'M7',
                 'phase': M7_COMPLETE,
-                'status': M7_SEARCH_SPACE_EXHAUSTED,
+                'status': M7_LINEAGE_PLANNED,
+                'campaign': 'B',
                 'search_run_id': self.config.run_id,
                 'parent_m6_run_id': self.config.parent_m6_run_id,
                 'best_so_far': best,
+                'lineage_plans': len(lineage_plans),
                 'notes': (
+                    'Campaign B emitted S2 M3→M6 lineage plans under LOCK. '
+                    'No q_cert_upper < 1 certificate was produced in plan_only '
+                    'mode. Execute child lineages, then re-verify.'
+                ),
+                'diagnosis': diagnosis,
+                'generated_at': utc_now(),
+            })
+        else:
+            search_status = M7_SEARCH_SPACE_EXHAUSTED
+            phase = M7_COMPLETE
+            next_note = (
+                'Campaign B search space exhausted without q_cert_upper < 1. '
+                'This does not prove non-existence of a certifiable scheme. '
+                'Next: execute planned lineages or escalate to Campaign C '
+                '(geometry) under human review.'
+                if self.config.campaign == 'B'
+                else (
                     'Campaign A search space exhausted without q_cert_upper < 1. '
                     'This does not prove non-existence of a certifiable scheme. '
                     'Next: Campaign B (rank/cutoff) under LOCK change control.'
-                ),
+                )
+            )
+            atomic_write_json(reports / 'M7_acceptance.json', {
+                'schema_version': 1,
+                'milestone': 'M7',
+                'phase': M7_COMPLETE,
+                'status': M7_SEARCH_SPACE_EXHAUSTED,
+                'campaign': self.config.campaign,
+                'search_run_id': self.config.run_id,
+                'parent_m6_run_id': self.config.parent_m6_run_id,
+                'best_so_far': best,
+                'notes': next_note,
                 'diagnosis': diagnosis,
                 'generated_at': utc_now(),
             })
@@ -503,10 +755,13 @@ class M7Orchestrator:
             'milestone': 'M7',
             'run_id': self.config.run_id,
             'parent_m6_run_id': self.config.parent_m6_run_id,
+            'campaign': self.config.campaign,
+            'lineage_mode': self.config.lineage_mode,
             'phase': phase,
             'search_status': search_status,
             'diagnosis': diagnosis,
             'candidates_evaluated': rigorous_count,
+            'lineage_plans': len(lineage_plans),
             'best_so_far': best,
             'accepted': (
                 {
@@ -544,15 +799,19 @@ def _render_summary(summary: dict[str, Any]) -> str:
         '',
         f"- run_id: `{summary.get('run_id')}`",
         f"- parent_m6: `{summary.get('parent_m6_run_id')}`",
+        f"- campaign: `{summary.get('campaign')}`",
+        f"- lineage_mode: `{summary.get('lineage_mode')}`",
         f"- phase: `{summary.get('phase')}`",
         f"- search_status: `{summary.get('search_status')}`",
         f"- candidates_evaluated: `{summary.get('candidates_evaluated')}`",
+        f"- lineage_plans: `{summary.get('lineage_plans')}`",
         '',
         '## Interpretation',
         '',
         'Success requires CERTIFIED_SCHEME_FOUND with independent q_cert_upper < 1.',
-        'Exhaustion means the locked Campaign A space found no certificate;',
-        'it does not prove that no certifiable scheme exists.',
+        'Campaign A exhaustion does not prove non-existence of a certifiable scheme.',
+        'Campaign B plan_only emits S2 M3→M6 lineage plans; execute them under LOCK.',
+        'Fixture residual certificates are controller tests only, not live lineage.',
         '',
     ]
     return '\n'.join(lines) + '\n'
@@ -575,8 +834,13 @@ def create_or_resume_m7(
             raise M7OrchestratorError(
                 f'paperspace mode requires parent {M6_PARENT_RUN_ID_FROZEN}'
             )
-        if cfg.run_id != M7_RUN_ID_FROZEN:
+        if cfg.campaign == 'B':
+            if cfg.run_id != M7_RUN_ID_CAMPAIGN_B:
+                raise M7OrchestratorError(
+                    f'paperspace Campaign B requires run_id {M7_RUN_ID_CAMPAIGN_B}'
+                )
+        elif cfg.run_id != M7_RUN_ID_FROZEN:
             raise M7OrchestratorError(
-                f'paperspace mode requires run_id {M7_RUN_ID_FROZEN}'
+                f'paperspace Campaign A requires run_id {M7_RUN_ID_FROZEN}'
             )
     return M7Orchestrator(project, persist, cfg)

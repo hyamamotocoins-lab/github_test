@@ -120,15 +120,21 @@ def _array_sha256(value: np.ndarray) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _load_tensors(checkpoint: Path, report: dict[str, Any]) -> dict[str, np.ndarray]:
+def _load_tensors(
+    checkpoint: Path,
+    report: dict[str, Any],
+    *,
+    projected_rank: int,
+) -> dict[str, np.ndarray]:
     loaded = TensorShardStore(64 * 1024 * 1024).load(checkpoint / 'tensors')
+    rank = int(projected_rank)
     expected_shapes = {
-        'rsvd_left': (729, 16),
-        'rsvd_singular_values': (16,),
-        'rsvd_right_t': (16, 729),
-        'triad_left': (729, 16),
-        'triad_core': (16, 16),
-        'triad_right': (16, 729),
+        'rsvd_left': (729, rank),
+        'rsvd_singular_values': (rank,),
+        'rsvd_right_t': (rank, 729),
+        'triad_left': (729, rank),
+        'triad_core': (rank, rank),
+        'triad_right': (rank, 729),
     }
     if set(loaded) != set(expected_shapes):
         raise M4ParentError('Accepted M3 tensor set changed.')
@@ -242,7 +248,9 @@ def verify_accepted_m3_parent(
         manifest.get('certification_status') != 'NOT_CERTIFIED',
     )):
         raise M4ParentError('Accepted M3 manifest identity changed.')
-    tensors = _load_tensors(checkpoint, report)
+    tensors = _load_tensors(
+        checkpoint, report, projected_rank=config.projected_rank,
+    )
     rsvd = report['results']['M3_RSVD']['result']
     return M4ParentEvidence(
         {

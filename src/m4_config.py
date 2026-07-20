@@ -87,12 +87,18 @@ class M4Config:
             for value in integers
         ):
             raise ValueError('M4 discrete configuration fields must be integers.')
-        if (
-            self.operator_dimension != 729
-            or self.projected_rank != 16
-            or self.source_channel_count != 5
-        ):
+        if self.operator_dimension != 729 or self.source_channel_count != 5:
             raise ValueError('M4 is fixed to the accepted M3 finite core.')
+        # projected_rank must be a perfect square so regroup_matrix (leg^4) works.
+        leg = int(round(self.projected_rank ** 0.5))
+        if (
+            not 1 <= self.projected_rank < self.operator_dimension
+            or leg * leg != self.projected_rank
+        ):
+            raise ValueError(
+                'M4 projected_rank must be a perfect square in '
+                f'[1, {self.operator_dimension}).'
+            )
         if self.dtype != 'float64' or not isinstance(self.require_cuda, bool):
             raise ValueError('M4 requires an explicit FP64 backend policy.')
         if (

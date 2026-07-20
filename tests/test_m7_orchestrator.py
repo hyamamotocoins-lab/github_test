@@ -8,6 +8,7 @@ from src.m7_status import (
     CERTIFIED_SCHEME_FOUND,
     M7_CERTIFIED_SCHEME_FOUND,
     M7_COMPLETE,
+    M7_LINEAGE_PLANNED,
     M7_SEARCH_SPACE_EXHAUSTED,
 )
 from src.orchestrator import GOVERNING_DOCUMENTS, REFERENCE_ARTIFACTS
@@ -53,32 +54,69 @@ def test_m7_campaign_a_can_exhaust_without_claiming_nonexistence(tmp_path: Path)
     project = tmp_path / 'project'
     persist = tmp_path / 'persist'
     _seed(project)
-    config = default_m7_config(
-        parent_m6_run_id='M6-fixture',
-        run_id='M7-fixture-search',
-        mode='cpu_fixture_search',
-        # Exclude the leading contractive candidate by using paperspace-like
-        # generation only: use mode that still builds noncontractive parent but
-        # force campaign candidates without fixture contractive by lowering to
-        # paperspace generation via custom: use cpu_fixture without cert insert.
-        max_candidates_total=4,
-        max_rigorous_replays=4,
-        stop_on_first_certified=True,
-    )
-    # cpu_fixture_search prepends contractive candidate — so it will find CERTIFIED.
-    # For exhaustion, run paperspace-like generation against noncontractive only:
-    orch = create_or_resume_m7(persist, config, project)
-    # Monkeypatch by using mode that doesn't prepend: recreate with only campaign.
     from src.m7_orchestrator import M7Orchestrator
     orch2 = M7Orchestrator(project, persist, default_m7_config(
         parent_m6_run_id='M6-fixture',
         run_id='M7-fixture-exhaust',
-        mode='cpu_fixture',  # not cert, not search — campaign only on noncontractive
+        mode='cpu_fixture',
         max_candidates_total=3,
         max_rigorous_replays=3,
     ))
     summary = orch2.run_search()
     assert summary['phase'] == M7_COMPLETE
-    # Non-contractive parent + Campaign A reweight/product cannot certify.
     assert summary['search_status'] == M7_SEARCH_SPACE_EXHAUSTED
     assert summary['accepted'] is None
+
+
+def test_m7_campaign_b_plan_only_emits_lineage_plans(tmp_path: Path) -> None:
+    project = tmp_path / 'project'
+    persist = tmp_path / 'persist'
+    _seed(project)
+    from src.m7_orchestrator import M7Orchestrator
+    orch = M7Orchestrator(project, persist, default_m7_config(
+        parent_m6_run_id='M6-fixture',
+        run_id='M7-fixture-b-plan',
+        mode='cpu_fixture',
+        campaign='B',
+        lineage_mode='plan_only',
+        max_candidates_total=4,
+        max_rigorous_replays=4,
+    ))
+    summary = orch.run_search()
+    assert summary['phase'] == M7_COMPLETE
+    assert summary['search_status'] == M7_LINEAGE_PLANNED
+    assert summary['accepted'] is None
+    assert summary['lineage_plans'] == 4
+    plans = orch.search_root / 'reports' / 'lineage_plans.json'
+    assert plans.is_file()
+    from src.common import read_json
+    doc = read_json(plans)
+    assert doc['plans'][0]['change_class'] == 'S2'
+    assert 'M3' in doc['plans'][0]['child_run_ids']
+
+
+def test_m7_campaign_b_fixture_residual_can_certify(tmp_path: Path) -> None:
+    project = tmp_path / 'project'
+    persist = tmp_path / 'persist'
+    _seed(project)
+    config = default_m7_config(
+        parent_m6_run_id='M6-fixture',
+        run_id='M7-fixture-b-cert',
+        mode='cpu_fixture_campaign_b',
+        campaign='B',
+        lineage_mode='fixture_residual',
+        max_candidates_total=4,
+        max_rigorous_replays=2,
+        max_lineage_replays=2,
+        stop_on_first_certified=True,
+    )
+    orch = create_or_resume_m7(persist, config, project)
+    summary = orch.run_search()
+    assert summary['phase'] == M7_COMPLETE
+    assert summary['search_status'] == M7_CERTIFIED_SCHEME_FOUND
+    assert summary['accepted'] is not None
+    assert float(summary['accepted']['q_cert_upper']) < 1
+    from src.common import read_json
+    acceptance = read_json(orch.search_root / 'final_package' / 'M7_acceptance.json')
+    assert acceptance['independent_verifier'] == 'PASS'
+    assert acceptance.get('campaign') == 'B'

@@ -282,7 +282,7 @@ def make_singleton_step(
             'input_ball': 'singleton',
             'input_radius': '0',
             'j2_max': 1,
-            'bond_dimension': 16,
+            'bond_dimension': int(config.get('bond_dimension', 16)),
         },
         'tensors_hashes.json': {
             'parent_one_step_package_hash_ref': parent_package_hash,
