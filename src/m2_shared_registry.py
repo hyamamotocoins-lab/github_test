@@ -378,6 +378,36 @@ def verify_shared_m2(
     return payload
 
 
+def sync_child_run_ids_m2(package_root: Path, canonical_run_id: str) -> dict[str, Any]:
+    """Ensure package child_run_ids.json includes M2 = canonical shared run id."""
+    if not isinstance(canonical_run_id, str) or not canonical_run_id.strip():
+        raise M2SharedRegistryError('canonical_run_id required to sync child_run_ids.M2')
+    path = Path(package_root) / 'child_run_ids.json'
+    child_ids = read_json(path) if path.is_file() else {}
+    if not isinstance(child_ids, dict):
+        child_ids = {}
+    child_ids = dict(child_ids)
+    child_ids['M2'] = canonical_run_id.strip()
+    atomic_write_json(path, child_ids)
+    return child_ids
+
+
+def ensure_package_m2_run_id(package_root: Path) -> str:
+    """Return M2 run id from child_run_ids or m2_binding; sync child_run_ids if needed."""
+    package_root = Path(package_root)
+    child_ids = read_json(package_root / 'child_run_ids.json') if (package_root / 'child_run_ids.json').is_file() else {}
+    if isinstance(child_ids, dict) and isinstance(child_ids.get('M2'), str) and child_ids['M2'].strip():
+        return child_ids['M2'].strip()
+    binding = read_binding(package_root)
+    if isinstance(binding, dict) and isinstance(binding.get('canonical_run_id'), str) and binding['canonical_run_id'].strip():
+        sync_child_run_ids_m2(package_root, binding['canonical_run_id'])
+        return binding['canonical_run_id'].strip()
+    raise M2SharedRegistryError(
+        'Package child_run_ids.M2 missing and m2_binding.canonical_run_id unset. '
+        'Run resolve_m2_binding / notebook 82 promotion cell first.'
+    )
+
+
 def write_binding(package_root: Path, binding: dict[str, Any]) -> dict[str, Any]:
     # READY_SHARED bindings are immutable.
     path = Path(package_root) / 'm2_binding.json'
@@ -398,6 +428,9 @@ def write_binding(package_root: Path, binding: dict[str, Any]) -> dict[str, Any]
     ):
         raise M2SharedRegistryError('READY_SHARED registry record hash changed')
     atomic_write_json(path, binding)
+    canonical = binding.get('canonical_run_id')
+    if isinstance(canonical, str) and canonical.strip():
+        sync_child_run_ids_m2(package_root, canonical)
     return binding
 
 

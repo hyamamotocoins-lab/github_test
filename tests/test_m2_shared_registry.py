@@ -19,6 +19,7 @@ from src.m2_shared_registry import (
     MODE_LEGACY,
     MODE_STRICT,
     M2SharedRegistryError,
+    ensure_package_m2_run_id,
     lookup_shared_m2,
     register_shared_m2_from_run,
     reserve_shared_m2,
@@ -275,6 +276,8 @@ def test_ready_binding_immutable(tmp_path: Path) -> None:
         'registry_record_sha256': 'r1',
         'mode': 'REUSE_SHARED',
     })
+    child = json.loads((pkg / 'child_run_ids.json').read_text(encoding='utf-8'))
+    assert child['M2'] == 'M2-SHARED-x'
     with pytest.raises(M2SharedRegistryError):
         write_binding(pkg, {
             'schema_version': 2,
@@ -284,6 +287,24 @@ def test_ready_binding_immutable(tmp_path: Path) -> None:
             'canonical_run_id': 'M2-SHARED-x',
             'mode': 'NEED_CANONICAL_M2',
         })
+
+
+def test_ensure_package_m2_run_id_syncs_from_binding(tmp_path: Path) -> None:
+    pkg = tmp_path / 'pkg'
+    pkg.mkdir()
+    atomic_write_json(pkg / 'm2_binding.json', {
+        'schema_version': 2,
+        'state': 'NEED_CANONICAL_M2',
+        'canonical_run_id': 'M2-SHARED-ed77fc1e-207ed187722f',
+        'mode': 'NEED_CANONICAL_M2',
+    })
+    # Simulate pre-fix package: binding present, child_run_ids.M2 absent.
+    atomic_write_json(pkg / 'child_run_ids.json', {'M3': 'M3-x', 'M4': 'M4-x'})
+    m2_id = ensure_package_m2_run_id(pkg)
+    assert m2_id == 'M2-SHARED-ed77fc1e-207ed187722f'
+    child = json.loads((pkg / 'child_run_ids.json').read_text(encoding='utf-8'))
+    assert child['M2'] == m2_id
+    assert child['M3'] == 'M3-x'
 
 
 def test_package_audits_do_not_clobber(tmp_path: Path) -> None:

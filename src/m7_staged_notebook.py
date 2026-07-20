@@ -102,10 +102,16 @@ def start_staged_background_worker(
             **current,
         }
 
-    child_ids = read_json(package_root / 'child_run_ids.json')
-    if not isinstance(child_ids, dict) or not isinstance(child_ids.get('M2'), str):
-        raise M7StagedNotebookError('Package child_run_ids.M2 missing.')
-    m2_id = child_ids['M2']
+    try:
+        from src.m2_shared_registry import ensure_package_m2_run_id
+
+        m2_id = ensure_package_m2_run_id(package_root)
+    except Exception as exc:
+        raise M7StagedNotebookError(
+            'Package child_run_ids.M2 missing. '
+            'Re-run notebook 82 resolve_m2_binding for this candidate, then retry. '
+            f'({exc})'
+        ) from exc
 
     if test_report is not None:
         atomic_write_json(paths['dir'] / 'test_report.json', test_report)
