@@ -156,9 +156,10 @@ class CampaignBConfig:
     never_stop: bool = True
     screening_margin: float = 1e-6
     stop_after_first_verified_q_lt_1: bool = False
-    allow_generate_canonical_m2: bool = False
-    # continue_archive | defer | stop_campaign
-    on_missing_m2: str = 'continue_archive'
+    allow_generate_canonical_m2: bool = True
+    # continue_archive | auto_generate | stop_campaign
+    on_missing_m2: str = 'auto_generate'
+    shared_m2_j2_max: int = 2
     search_space: dict[str, Any] = field(default_factory=dict)
     search_space_path: Path | None = None
     parent_evidence: dict[str, Any] = field(default_factory=dict)
@@ -246,8 +247,8 @@ def load_campaign_b_config(path: Path) -> CampaignBConfig:
         raise InvariantViolation('claim_scope must be SCREENING_ONLY')
 
     shared_m2 = raw.get('shared_m2') or {}
-    allow_gen = bool(shared_m2.get('allow_generate_canonical', False))
-    on_missing = str(shared_m2.get('on_missing', 'continue_archive'))
+    allow_gen = bool(shared_m2.get('allow_generate_canonical', True))
+    on_missing = str(shared_m2.get('on_missing', 'auto_generate'))
 
     space_path = raw.get('search_space_path')
     if space_path:
@@ -292,6 +293,7 @@ def load_campaign_b_config(path: Path) -> CampaignBConfig:
         ),
         allow_generate_canonical_m2=allow_gen,
         on_missing_m2=on_missing,
+        shared_m2_j2_max=int(shared_m2.get('j2_max', raw.get('shared_m2_j2_max', 2))),
         search_space=space,
         search_space_path=space_file,
         parent_evidence=parent,

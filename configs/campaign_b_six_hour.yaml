@@ -28,8 +28,9 @@ execution_policy:
   certification_status: NOT_CERTIFIED
   claim_scope: SCREENING_ONLY
 shared_m2:
-  allow_generate_canonical: false
-  on_missing: continue_archive
+  allow_generate_canonical: true
+  on_missing: auto_generate
+  j2_max: 2
 never_stop: true
 stop_after_first_verified_q_lt_1: false
 independent_verifier:

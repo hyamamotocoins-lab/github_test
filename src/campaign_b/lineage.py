@@ -24,6 +24,9 @@ def resolve_shared_m2(
     allow_generate_canonical: bool,
     structural_key: str | None = None,
     proof_key: str | None = None,
+    project_root: Path | None = None,
+    j2_max: int = 2,
+    owner_id: str = 'campaign_b_auto',
 ) -> dict[str, Any]:
     assert_phase_allowed('M2_BIND')
     assert_staged_candidate(candidate)
@@ -40,9 +43,14 @@ def resolve_shared_m2(
     )
     if record is None or record.get('registry_state') != STATE_COMPLETE:
         if allow_generate_canonical:
-            # Generation is intentionally not implemented in autonomous B driver.
-            raise NeedCanonicalM2(
-                f'canonical M2 missing for {sk}/{pk}; generation not wired'
+            from .canonical_m2 import ensure_canonical_shared_m2
+
+            return ensure_canonical_shared_m2(
+                persistent_root=Path(persistent_root),
+                project_root=Path(project_root) if project_root else Path(__file__).resolve().parents[2],
+                source_tree_hash=source_tree_hash,
+                j2_max=max(2, int(j2_max)),
+                owner_id=owner_id,
             )
         return {
             'status': BINDING_NEED,

@@ -434,13 +434,20 @@ def run_campaign_b(config_path: Path | str) -> dict[str, Any]:
                     raise TimeBudgetClosed('M2_RESOLVE')
 
                 store.update_candidate(queue, cand_id, state='M2_RESOLVE')
+                # auto_generate: drive staged j2>=2 canonical shared M2 (84/73 path)
+                allow_gen = bool(cfg.allow_generate_canonical_m2) or (
+                    never_stop and cfg.on_missing_m2 == 'auto_generate'
+                )
                 m2 = resolve_shared_m2(
                     candidate=candidate,
                     persistent_root=cfg.persistent_root,
                     source_tree_hash=source_hash,
-                    allow_generate_canonical=cfg.allow_generate_canonical_m2,
+                    allow_generate_canonical=allow_gen,
                     structural_key=cfg.structural_key,
                     proof_key=cfg.proof_key,
+                    project_root=repo_root,
+                    j2_max=int(getattr(cfg, 'shared_m2_j2_max', 2)),
+                    owner_id=f'campaign_b:{cfg.campaign_run_id}',
                 )
                 from ..m2_shared_registry import BINDING_NEED
                 if (
