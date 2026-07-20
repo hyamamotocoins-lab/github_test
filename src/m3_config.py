@@ -91,11 +91,19 @@ class M3Config:
             for value in integers
         ):
             raise ValueError('M3 discrete configuration fields must be integers.')
+        from .cutoff_dims import operator_dimension as expected_operator_dimension
+        from .cutoff_dims import sector_count as expected_sector_count
+
+        if not 1 <= self.j2_max <= 4:
+            raise ValueError('M3 j2_max must lie in [1, 4].')
         if (
-            self.j2_max != 1 or self.sector_count != 64
-            or self.operator_dimension != 729
+            self.sector_count != expected_sector_count(self.j2_max)
+            or self.operator_dimension != expected_operator_dimension(self.j2_max)
         ):
-            raise ValueError('M3 pilot is fixed at the accepted M2 low cutoff.')
+            raise ValueError(
+                'M3 sector_count/operator_dimension must match derived '
+                f'cutoff dims for j2_max={self.j2_max}.'
+            )
         if not 1 <= self.target_rank < self.operator_dimension:
             raise ValueError('M3 target rank is invalid.')
         if self.oversampling < 1 or self.power_iterations < 0:

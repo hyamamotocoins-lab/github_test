@@ -564,6 +564,7 @@ class M7Orchestrator:
         ranking: list[dict[str, Any]] = []
         screening_rows: list[dict[str, Any]] = []
         lineage_plans: list[dict[str, Any]] = []
+        auto_summary: dict[str, Any] | None = None
         accepted: dict[str, Any] | None = None
         rigorous_count = 0
         lineage_count = 0
@@ -621,7 +622,7 @@ class M7Orchestrator:
                 break
             if (
                 self.config.campaign in {'B', 'C'}
-                and self.config.lineage_mode == 'plan_only'
+                and self.config.lineage_mode in {'plan_only', 'auto'}
             ):
                 # Paperspace default: emit plans/screens without claiming CERTIFIED.
                 ranking.append({
@@ -803,7 +804,7 @@ class M7Orchestrator:
             phase = M7_COMPLETE
         elif (
             self.config.campaign in {'B', 'C'}
-            and self.config.lineage_mode == 'plan_only'
+            and self.config.lineage_mode in {'plan_only', 'auto'}
             and lineage_plans
         ):
             search_status = M7_LINEAGE_PLANNED
@@ -836,6 +837,22 @@ class M7Orchestrator:
                 'diagnosis': diagnosis,
                 'generated_at': utc_now(),
             })
+            if (
+                self.config.campaign == 'C'
+                and self.config.lineage_mode == 'auto'
+            ):
+                from .m7_auto_execute import run_campaign_c_automation
+                auto_summary = run_campaign_c_automation(
+                    self.search_root,
+                    parent_m6_run_id=self.config.parent_m6_run_id,
+                    search_run_id=self.config.run_id,
+                    human_review_approved=self.config.human_review_approved,
+                    auto_approve=self.config.auto_approve_for_materialize,
+                    max_executable_j2_max=self.config.max_executable_j2_max,
+                    parent_j2_max=self.config.parent_j2_max,
+                )
+                atomic_write_json(reports / 'auto_execute_summary.json', auto_summary)
+
         else:
             search_status = M7_SEARCH_SPACE_EXHAUSTED
             phase = M7_COMPLETE
@@ -886,6 +903,7 @@ class M7Orchestrator:
             'diagnosis': diagnosis,
             'candidates_evaluated': rigorous_count,
             'lineage_plans': len(lineage_plans),
+            'auto_execute': auto_summary,
             'best_so_far': best,
             'accepted': (
                 {

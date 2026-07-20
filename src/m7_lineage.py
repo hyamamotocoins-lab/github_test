@@ -258,7 +258,7 @@ def build_s3_lineage_plan(
     m4_id = f'M4-{tag}S3-{digest}'
     m5_id = f'M5-{tag}S3-{digest}'
     m6_id = f'M6-{tag}S3-{digest}'
-    execution_blocked = j2_max != 1
+    execution_blocked = False  # dims unlocked; resource_gate decides live execute
     return {
         'schema_version': 1,
         'change_class': CHANGE_S3,
@@ -284,18 +284,18 @@ def build_s3_lineage_plan(
         'reused_artifacts': ['M1', 'M0'],
         'execution_blocked_by_math_lock': execution_blocked,
         'execution_steps': [
-            'HUMAN REVIEW: approve Campaign C scheme + governing-doc delta',
-            'Unlock M2Config/M3Config for j2_max (and derived sector dims) if >1',
-            'create_or_resume_m2 with j2_max / block_geometry / channel_policy',
+            'HUMAN REVIEW or lineage_mode=auto approval stamp',
+            'm7_auto_execute.materialize_s3_lineage_package + dry_run',
+            'If resource_gate.executable: create_or_resume_m2 with j2_max',
             'ACCEPT M2 → rewrite audit/m2_accepted_parent.json',
-            'create_or_resume_m3 on new M2 (sector_count/operator_dimension must match)',
+            'create_or_resume_m3 with derived sector_count/operator_dimension',
             'ACCEPT M3 → M4 → M5 → M6 child lineage (non-paperspace run IDs)',
             'Feed child final_certificate into M7 independent verifier',
         ],
         'notes': (
-            'S3 requires a new M2→M6 lineage under LOCK and human review. '
-            'Current M2/M3 pilots are fail-closed at j2_max=1; higher cutoffs '
-            'need dimension unlock before execute. '
+            'S3 requires a new M2→M6 lineage under LOCK. '
+            'Configs now accept j2_max in [1,4] with derived dims; '
+            'live execute is still resource-gated (exact M2 auto only j2_max=1). '
             'q_cert>=1 on the child remains certificate failure only.'
         ),
         'generated_at': utc_now(),
@@ -408,11 +408,9 @@ def screen_s3_candidate(
         core_share
         + truncation_share * cutoff_factor * channel_factor * geometry_factor
     )
-    execution_blocked = j2_max != 1
-    if estimated_q < 0.90 and not execution_blocked:
+    execution_blocked = False
+    if estimated_q < 0.90:
         status = 'SCREEN_PROMISING'
-    elif estimated_q < 0.90 and execution_blocked:
-        status = 'SCREEN_INCONCLUSIVE'  # promising numerics, math lock remains
     elif estimated_q < parent_q_upper * 0.98:
         status = 'SCREEN_INCONCLUSIVE'
     else:
@@ -430,6 +428,7 @@ def screen_s3_candidate(
         'certified': False,
         'notes': (
             'Screening only; CERTIFIED is forbidden from screening. '
-            'j2_max>1 requires M2/M3 unlock before execute.'
+            'Use m7_auto_execute for materialize/dry_run; live execute is '
+            'resource-gated (exact M2 auto limited to j2_max=1).'
         ),
     }

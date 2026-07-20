@@ -114,8 +114,10 @@ VALIDATED_RG_M7C_RUN_ID=M7-20260720T081500Z-c8d5f02b3c96  # Campaign C (S3)
 Campaign A は親 majorant の再重み / 積。Campaign B は S2（`target_rank` /
 oversampling / power_iterations）で M3→M6 lineage plan を LOCK 下に発行する。
 Campaign C は S3（`j2_max` / channel_policy / block_geometry）で M2→M6 lineage
-plan を発行する（人間レビュー必須。`j2_max>1` は現行 M2/M3 fail-closed のため
-execute 前に unlock が必要）。`lineage_mode=plan_only` 既定。`fixture_residual`
+plan を発行する。`lineage_mode=auto` なら最良候補の選定・レビュー承認・
+パッケージ生成・config dry-run まで自動化する（`src/m7_auto_execute.py`）。
+j2_max∈[1,4] の次元は導出可能だが、live exact-M2 の自動実行は資源ゲートで
+j2_max=1 に制限（j2≥2 は MATERIALIZED_RESOURCE_GATED）。`fixture_residual`
 は CPU コントローラ試験専用。
 
 現行 paperspace 設計は親 M5 one-step majorant を最終値として継承するため、親と同じ

@@ -125,16 +125,18 @@ def _load_tensors(
     report: dict[str, Any],
     *,
     projected_rank: int,
+    operator_dimension: int = 729,
 ) -> dict[str, np.ndarray]:
     loaded = TensorShardStore(64 * 1024 * 1024).load(checkpoint / 'tensors')
     rank = int(projected_rank)
+    dim = int(operator_dimension)
     expected_shapes = {
-        'rsvd_left': (729, rank),
+        'rsvd_left': (dim, rank),
         'rsvd_singular_values': (rank,),
-        'rsvd_right_t': (rank, 729),
-        'triad_left': (729, rank),
+        'rsvd_right_t': (rank, dim),
+        'triad_left': (dim, rank),
         'triad_core': (rank, rank),
-        'triad_right': (rank, 729),
+        'triad_right': (rank, dim),
     }
     if set(loaded) != set(expected_shapes):
         raise M4ParentError('Accepted M3 tensor set changed.')
@@ -249,7 +251,9 @@ def verify_accepted_m3_parent(
     )):
         raise M4ParentError('Accepted M3 manifest identity changed.')
     tensors = _load_tensors(
-        checkpoint, report, projected_rank=config.projected_rank,
+        checkpoint, report,
+        projected_rank=config.projected_rank,
+        operator_dimension=config.operator_dimension,
     )
     rsvd = report['results']['M3_RSVD']['result']
     return M4ParentEvidence(

@@ -74,8 +74,11 @@ class M2Config:
             for value in integer_fields
         ):
             raise ValueError('M2 discrete configuration fields must be integers.')
-        if self.j2_max != 1 or self.leg_count != 6:
-            raise ValueError('M2 is deliberately fail-closed at six legs and j2_max=1.')
+        if not 1 <= self.j2_max <= 4 or self.leg_count != 6:
+            raise ValueError(
+                'M2 requires leg_count=6 and j2_max in [1, 4] '
+                '(higher cutoffs need a new governing-document revision).'
+            )
         if self.orientations != (1, -1, 1, -1, 1, -1):
             raise ValueError('M2 fixed link orientation convention changed.')
         if not 0 <= self.seed < 2**32:

@@ -43,8 +43,8 @@ class ArmillaryLinearOperator:
         self, blocks: tuple[SectorBlock, ...], backend: ContractionBackend,
         path_cache: ContractionPathCache, sectors_per_shard: int,
     ) -> None:
-        if len(blocks) != 64:
-            raise ValueError('M3 operator requires all 64 accepted M2 sectors.')
+        if len(blocks) < 1:
+            raise ValueError('M3 operator requires a nonempty sector block set.')
         self.blocks = blocks
         self.backend = backend
         self.path_cache = path_cache
@@ -53,8 +53,8 @@ class ArmillaryLinearOperator:
             sum(block.dimension for block in blocks),
             sum(block.dimension for block in blocks),
         )
-        if self.shape != (729, 729):
-            raise ValueError(f'M3 operator dimension changed: {self.shape}')
+        if self.shape[0] != self.shape[1] or self.shape[0] < 1:
+            raise ValueError(f'M3 operator dimension invalid: {self.shape}')
         for expected_offset, block in zip(
             np.cumsum([0, *(item.dimension for item in blocks[:-1])]),
             blocks, strict=True,

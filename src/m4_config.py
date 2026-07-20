@@ -87,8 +87,8 @@ class M4Config:
             for value in integers
         ):
             raise ValueError('M4 discrete configuration fields must be integers.')
-        if self.operator_dimension != 729 or self.source_channel_count != 5:
-            raise ValueError('M4 is fixed to the accepted M3 finite core.')
+        if self.operator_dimension < 1 or self.source_channel_count != 5:
+            raise ValueError('M4 operator_dimension/source_channel_count invalid.')
         # projected_rank must be a perfect square so regroup_matrix (leg^4) works.
         leg = int(round(self.projected_rank ** 0.5))
         if (

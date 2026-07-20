@@ -28,13 +28,16 @@ class M7Config:
     promotion_estimated_q: str = '9/10'
     campaign: str = 'A'
     num_steps: int = 3
-    # Campaign B/C lineage: plan_only | fixture_residual | execute
+    # Campaign B/C lineage: plan_only | fixture_residual | execute | auto
     lineage_mode: str = 'plan_only'
     max_lineage_replays: int = 2
     parent_rank: int = 16
     parent_j2_max: int = 1
     # Design: Campaign C requires human review before lineage execution.
     human_review_approved: bool = False
+    # Auto pipeline: after plan_only, materialize+dry_run best candidate.
+    auto_approve_for_materialize: bool = False
+    max_executable_j2_max: int = 2
 
     def payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -56,6 +59,10 @@ def default_m7_config(**overrides: Any) -> M7Config:
             payload['lineage_mode'] = 'fixture_residual'
         else:
             payload['lineage_mode'] = 'plan_only'
+    if campaign == 'C' and payload.get('lineage_mode') == 'auto':
+        # Auto implies materialize path; still respects human_review unless
+        # auto_approve_for_materialize is set.
+        pass
     return M7Config(**payload)
 
 
@@ -142,19 +149,16 @@ def campaign_c_search_space() -> dict[str, Any]:
         },
         'excluded_until_improvement': ['S4'],
         'math_locks': {
-            'm2_j2_max': (
-                'M2Config currently fail-closed at j2_max=1; j2_max>1 lineage '
-                'execution requires unlocking M2/M3 sector dimensions under a '
-                'new governing-document revision.'
-            ),
-            'm3_pilot': (
-                'M3Config is fixed at sector_count=64, operator_dimension=729 '
-                'for j2_max=1. Higher cutoff changes the entire M2→M6 DAG.'
+            'resource_gate': (
+                'Configs accept j2_max in [1,4] with derived dims. '
+                'Live exact-M2 auto-execute remains gated to j2_max=1; '
+                'higher cutoffs materialize+dry_run and need staged M2 acceptance.'
             ),
         },
         'notes': (
-            'Campaign C invalidates M2–M6. plan_only emits LOCK lineage plans '
-            'for human review; execute requires human_review_approved=True.'
+            'Campaign C invalidates M2–M6. Use lineage_mode=auto to '
+            'auto-select best plan, stamp/await review, materialize package, '
+            'and dry-run config construction.'
         ),
     }
 

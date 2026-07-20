@@ -65,10 +65,13 @@ class WignerCache:
 
 
 def generate_low_cutoff_cache(path: Path, j2_max: int = 1, leg_count: int = 6) -> str:
-    if j2_max != 1 or leg_count != 6:
-        raise ValueError('M2 cache generation is deliberately limited to j2_max=1 and six legs.')
+    if (
+        not isinstance(j2_max, int) or isinstance(j2_max, bool) or j2_max < 0
+        or leg_count != 6
+    ):
+        raise ValueError('M2 cache generation requires nonnegative j2_max and six legs.')
     cache = WignerCache()
-    reachable = {0, 1}
+    reachable = set(range(j2_max + 1))
     for _ in range(leg_count - 1):
         next_reachable: set[int] = set()
         for left_j2 in sorted(reachable):
@@ -84,9 +87,10 @@ def generate_low_cutoff_cache(path: Path, j2_max: int = 1, leg_count: int = 6) -
                                     total_j2, total_m2,
                                 )
         reachable = next_reachable
-    cache.three_j((1, 1, 0, 1, -1, 0))
-    cache.three_j((1, 1, 0, -1, 1, 0))
-    cache.six_j((1, 1, 0, 1, 1, 0))
+    if j2_max >= 1:
+        cache.three_j((1, 1, 0, 1, -1, 0))
+        cache.three_j((1, 1, 0, -1, 1, 0))
+        cache.six_j((1, 1, 0, 1, 1, 0))
     return cache.save(path)
 
 

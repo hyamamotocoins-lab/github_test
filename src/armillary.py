@@ -22,8 +22,11 @@ class SectorKey:
     def __post_init__(self) -> None:
         if len(self.representations) != 6 or len(self.orientations) != 6:
             raise ValueError('M2 SectorKey must describe a six-leg 4D link star.')
-        if any(j2 not in {0, 1} for j2 in self.representations):
-            raise ValueError('M2 is fail-closed at j2_max=1.')
+        if any(
+            not isinstance(j2, int) or isinstance(j2, bool) or j2 < 0
+            for j2 in self.representations
+        ):
+            raise ValueError('Sector representations must be nonnegative integers.')
         if any(sign not in {-1, 1} for sign in self.orientations):
             raise ValueError('Sector orientations must be +1 or -1.')
         if self.fusion_tree != 'left-associated':
@@ -68,8 +71,8 @@ def fixed_link_orientations() -> tuple[int, ...]:
 
 
 def all_link_star_keys(j2_max: int = 1) -> tuple[SectorKey, ...]:
-    if j2_max != 1:
-        raise ValueError('M2 is deliberately limited to j2_max=1.')
+    if not isinstance(j2_max, int) or isinstance(j2_max, bool) or j2_max < 0:
+        raise ValueError('j2_max must be a nonnegative integer.')
     orientations = fixed_link_orientations()
     return tuple(
         SectorKey(tuple(labels), orientations)
