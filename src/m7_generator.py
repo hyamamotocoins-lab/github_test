@@ -166,31 +166,32 @@ def generate_campaign_c_candidates(
         + [j for j in j2_all if j == 1]
         + [j for j in reversed(j2_all) if j not in {1, 2}]
     )
-    geometries = list(reversed(list(layers['block_geometry'])))
+    seeds = [int(s) for s in layers.get('seed', [20260720])]
     for j2_max in j2_values:
         for channel_policy in layers['channel_policy']:
-            for block_geometry in geometries:
+            for block_geometry in layers['block_geometry']:
                 for strategy in layers['perron_weight_strategy']:
                     for coupling in layers['coupling_policy']:
-                        index += 1
-                        scheme = {
-                            'change_class': CHANGE_S3,
-                            'majorant_policy': 'S3_GEOMETRY_CUTOFF_LINEAGE',
-                            'j2_max': int(j2_max),
-                            'channel_policy': channel_policy,
-                            'block_geometry': block_geometry,
-                            'perron_weight_strategy': strategy,
-                            'coupling_policy': coupling,
-                            'seed': 20260720,
-                            'num_steps': 3,
-                        }
-                        candidates.append(
-                            _candidate(
-                                index, scheme, parent_m6_run_id, parent_scheme_hash,
+                        for seed in seeds:
+                            index += 1
+                            scheme = {
+                                'change_class': CHANGE_S3,
+                                'majorant_policy': 'S3_GEOMETRY_CUTOFF_LINEAGE',
+                                'j2_max': int(j2_max),
+                                'channel_policy': channel_policy,
+                                'block_geometry': block_geometry,
+                                'perron_weight_strategy': strategy,
+                                'coupling_policy': coupling,
+                                'seed': seed,
+                                'num_steps': 3,
+                            }
+                            candidates.append(
+                                _candidate(
+                                    index, scheme, parent_m6_run_id, parent_scheme_hash,
+                                )
                             )
-                        )
-                        if len(candidates) >= limit:
-                            return candidates
+                            if len(candidates) >= limit:
+                                return candidates
     return candidates
 
 

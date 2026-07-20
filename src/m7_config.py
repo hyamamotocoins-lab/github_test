@@ -133,12 +133,13 @@ def campaign_c_search_space() -> dict[str, Any]:
         'layers': {
             'j2_max': [1, 2, 3, 4],
             'channel_policy': [
-                'complete_at_cutoff',
+                # Prefer stronger screening shrink first for q<1 hunt.
                 'certified_pruned',
+                'complete_at_cutoff',
             ],
             'block_geometry': [
-                'current',
                 'approved_geometry_B',
+                'current',
             ],
             'perron_weight_strategy': [
                 'all_ones',
@@ -146,6 +147,12 @@ def campaign_c_search_space() -> dict[str, Any]:
             ],
             'coupling_policy': [
                 'uniform_full',
+                'diagonal_plus_l1_tail',
+            ],
+            'seed': [
+                20260720,
+                20260721,
+                20260722,
             ],
         },
         'excluded_until_improvement': ['S4'],
@@ -160,7 +167,9 @@ def campaign_c_search_space() -> dict[str, Any]:
         'notes': (
             'Campaign C invalidates M2–M6. lineage_mode=auto selects staged '
             'q<1 (j2=2) when screening estimates allow, else live-capable '
-            'lowest q; materialize+dry_run always.'
+            'lowest q; materialize+dry_run always. Expanded coupling/seeds '
+            'are for q<1 hunt after the first C search exhausted without '
+            'staged screening q<1.'
         ),
     }
 
