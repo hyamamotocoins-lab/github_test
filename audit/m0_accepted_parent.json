@@ -1,0 +1,46 @@
+{
+  "acceptance_basis": "USER_PROVIDED_M0_REPORT",
+  "accepted_for_next_milestone": "M1",
+  "accepted_phase": "M0_COMPLETE",
+  "certification_status": "NOT_CERTIFIED",
+  "checkpoint_index": 14,
+  "checkpoint_save_s": 0.0750003969296813,
+  "checkpoint_size_bytes": 19271,
+  "checkpoint_verify_s": 0.001460554078221321,
+  "governing_document_hashes": {
+    "AGENTS.md": "a9d9eeefcdf4a81f838f4c5fe35b7b3b58b10a0ed03606b3a2ff4de8bcecee14",
+    "validated_4d_su2_rg_codex_design.md": "c0e88fc4415fac671a65e742799a7f5e3b2ec8fd4d8f6595f66086e0c4c142a1",
+    "validated_4d_su2_rg_full_plan_bundle/AGENTS_validated_4d_su2_rg_v0_2.md": "1ef74f2d6aa79a072f90d55cb4e0d5666d0de9327d80b704f53c380ba59f1a7f",
+    "validated_4d_su2_rg_full_plan_bundle/CODEX_PROMPTS_M1_M6.md": "75368be5cef7d8049c21d8ad93d553ff9cc1880eaf900530f6938c1a6eafcf37",
+    "validated_4d_su2_rg_full_plan_bundle/M1_M6_VALIDATED_RG_ROADMAP.md": "b607186fe189de1d19002a32e6b13fdd8d7b1ee56f06c1eb56471b914c502902",
+    "validated_4d_su2_rg_full_plan_bundle/MATHEMATICAL_CERTIFICATION_SPEC.md": "dd2badcb720a7f1ae227d0887677f03eda6990c5106406f1ec5212db034d70be",
+    "validated_4d_su2_rg_full_plan_bundle/validated_4d_su2_rg_codex_design_v0_2.md": "cd047c529e9fc9aaf3930ab0f4253ff801b6a00120e6e713c0ebb119a6358c70"
+  },
+  "independent_checkpoint_audit_performed": false,
+  "memory": {
+    "cpu_ru_maxrss_raw": 633176,
+    "gpu_peak_allocated_bytes": 8831488
+  },
+  "parent_checkpoint": "ckpt_000014",
+  "parent_checkpoint_path": "/storage/validated_4d_su2_rg/runs/20260719T120406Z-731966c8fd28/checkpoints/ckpt_000014",
+  "parent_milestone": "M0",
+  "parent_run_id": "20260719T120406Z-731966c8fd28",
+  "queue": {
+    "done": 6,
+    "failed": 0,
+    "pending": 0,
+    "running": 0
+  },
+  "reference_artifact_hashes": {
+    "validated_4d_su2_rg_full_plan_bundle/validated_4d_su2_rg_M1_M6_tracker.ipynb": "22d3c132fe700c3440f2d9395217fae0852dd27f9123ea0454723f60e357db14",
+    "validated_4d_su2_rg_full_plan_bundle/validated_su2_rg_prototype.py": "3ac672a89a8a8a995e0b9bb1d16a5267ec8613f5a1846648938ef349665347d3",
+    "validated_4d_su2_rg_full_plan_bundle/validated_su2_rg_report.md": "0349c37d52e6e79eaa6e0469376312448caf5cdca43c26cacd9a2602b3b8d5dd"
+  },
+  "restart_test_status": "PASS",
+  "skipped_invalid": [],
+  "tests": {
+    "fresh_process_resume": "PASS",
+    "optional_gpu_suite": "PASS",
+    "required_cpu_suite": "PASS"
+  }
+}
