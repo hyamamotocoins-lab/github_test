@@ -106,6 +106,8 @@ def list_gpu_m3_queue(
         status = _gpu_status(package)
         if status == 'M3_COMPLETE' and not include_complete:
             continue
+        if status == 'M3_BLOCKED_BAD_M2' and not include_complete:
+            continue
         if status == 'M3_RUNNING':
             # Prefer resume of in-flight runs.
             priority = -1.0
@@ -128,6 +130,58 @@ def list_gpu_m3_queue(
     if max_candidates is not None:
         rows = rows[: int(max_candidates)]
     return rows
+
+
+def _parent_m2_j2_max(m2_run: Path) -> int:
+    """Read j2_max from the accepted parent M2 run (authoritative)."""
+    for rel in ('run_config.json', 'reports/M2_report.json'):
+        payload = _load_json(m2_run / rel)
+        if not isinstance(payload, dict):
+            continue
+        if payload.get('j2_max') is not None:
+            return int(payload['j2_max'])
+        cfg = payload.get('config')
+        if isinstance(cfg, dict) and cfg.get('j2_max') is not None:
+            return int(cfg['j2_max'])
+        results = payload.get('results')
+        if isinstance(results, dict):
+            for key in ('M2_REPORT', 'M2_ARMILLARY', 'M2_DENSE_REFERENCE'):
+                block = results.get(key)
+                if not isinstance(block, dict):
+                    continue
+                result = block.get('result') if isinstance(block.get('result'), dict) else block
+                if isinstance(result, dict) and result.get('j2_max') is not None:
+                    return int(result['j2_max'])
+    raise GpuM3BatchError(f'cannot read j2_max from parent M2 run: {m2_run}')
+
+
+def _preflight_m2_equivalence(m2_run: Path, j2_max: int) -> None:
+    """Fail closed before create_or_resume_m3 if equivalence gate mismatches j2."""
+    from ..cutoff_dims import expected_m2_gate_counts
+
+    report = _load_json(m2_run / 'reports' / 'M2_report.json')
+    if not isinstance(report, dict):
+        raise GpuM3BatchError(f'missing M2_report.json under {m2_run}')
+    expected = expected_m2_gate_counts(int(j2_max))
+    equivalence = (
+        (report.get('results') or {}).get('M2_EQUIVALENCE', {}).get('result') or {}
+    )
+    if not isinstance(equivalence, dict):
+        raise GpuM3BatchError('M2_EQUIVALENCE result missing')
+    if (
+        equivalence.get('exact_match_count') != expected['exact_match_count']
+        or equivalence.get('mismatches') != []
+        or equivalence.get('comparison') not in {
+            'exact invariant-subspace uniqueness certificate',
+            'exact symbolic matrix equality',
+        }
+    ):
+        raise GpuM3BatchError(
+            'parent M2 equivalence gate incompatible with j2_max='
+            f'{j2_max}: exact_match_count={equivalence.get("exact_match_count")!r} '
+            f'expected={expected["exact_match_count"]}, '
+            f'comparison={equivalence.get("comparison")!r}'
+        )
 
 
 def prepare_package_for_m3(
@@ -164,14 +218,17 @@ def prepare_package_for_m3(
     if not acceptance.is_file():
         raise GpuM3BatchError(f'Shared M2 incomplete: missing {acceptance}')
 
-    j2 = int(candidate.get('j2') or (candidate.get('scheme') or {}).get('j2_max') or 2)
-    j2 = max(2, j2)  # Campaign B shared M2 is staged j2>=2
+    # M3 j2_max MUST match the parent M2 run (not the candidate's screening j2).
+    # Forcing candidate j2 (or max(2, j2)) caused:
+    #   M3CompatibilityError: Accepted M2 exact equivalence result changed.
+    j2 = _parent_m2_j2_max(m2_run)
+    _preflight_m2_equivalence(m2_run, j2)
     dims = cutoff_dimension_payload(j2)
     scheme = candidate.get('scheme') or {}
     target_rank = int(scheme.get('target_rank', 16))
     if not 1 <= target_rank < int(dims['operator_dimension']):
         raise GpuM3BatchError(
-            f'target_rank={target_rank} invalid for j2_max={j2} '
+            f'target_rank={target_rank} invalid for parent j2_max={j2} '
             f'(op_dim={dims["operator_dimension"]})'
         )
     oversampling = int(scheme.get('oversampling', 16))
@@ -204,6 +261,8 @@ def prepare_package_for_m3(
         'require_cuda': True,
         'change_class': CHANGE_S2,
         'candidate_id': candidate.get('candidate_id'),
+        'parent_m2_j2_max': j2,
+        'candidate_j2': candidate.get('j2'),
         **screening_only_payload(),
     }
     atomic_write_json(package / 'm3_config_overrides.json', overrides)
@@ -381,15 +440,21 @@ def run_gpu_m3_batch(
                 )
             )
         except Exception as exc:  # noqa: BLE001 — continue other candidates
+            msg = f'{type(exc).__name__}: {exc}'
+            blocked = (
+                'equivalence gate incompatible' in msg
+                or 'exact equivalence result changed' in msg
+                or 'cannot read j2_max' in msg
+            )
             err = {
                 'package': str(package),
                 'candidate_id': row.get('candidate_id'),
-                'error': f'{type(exc).__name__}: {exc}',
+                'error': msg,
                 **screening_only_payload(),
             }
             errors.append(err)
             _write_gpu_status(package, {
-                'status': 'M3_ERROR',
+                'status': 'M3_BLOCKED_BAD_M2' if blocked else 'M3_ERROR',
                 'error': err['error'],
             })
 
