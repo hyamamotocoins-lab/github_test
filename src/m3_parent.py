@@ -150,10 +150,25 @@ def _load_and_crosscheck_tensors(
     }
 
 
+def resolve_m2_parent_audit_path(project_root: Path, config: M3Config) -> Path:
+    """Resolve global relative audit or absolute package-local shared audit."""
+    raw = Path(config.parent_audit_path)
+    if raw.is_absolute():
+        return raw.resolve()
+    return (Path(project_root) / raw).resolve()
+
+
+_ALLOWED_M2_PARENT_DECISIONS = frozenset({
+    'ACCEPT_M2_FOR_M3_EXPLORATORY_IMPLEMENTATION',
+    # Package-local shared M2 audits (Campaign C); same gate strength, no global overwrite.
+    'ACCEPT_SHARED_M2_FOR_CANDIDATE_M3',
+})
+
+
 def verify_accepted_m2_parent(
     project_root: Path, config: M3Config,
 ) -> M3ParentEvidence:
-    audit_path = project_root / config.parent_audit_path
+    audit_path = resolve_m2_parent_audit_path(project_root, config)
     if audit_path.is_symlink() or not audit_path.is_file():
         raise M3ParentError('M2 acceptance audit is missing or unsafe.')
     audit = read_json(audit_path)
@@ -162,7 +177,6 @@ def verify_accepted_m2_parent(
         'accepted_for_next_milestone': 'M3',
         'accepted_phase': 'M2_COMPLETE',
         'accepted_run_id': config.parent_run_id,
-        'decision': 'ACCEPT_M2_FOR_M3_EXPLORATORY_IMPLEMENTATION',
         'certification_status': 'NOT_CERTIFIED',
         'independent_artifact_reload_performed': True,
     }
@@ -170,6 +184,14 @@ def verify_accepted_m2_parent(
         audit.get(key) != value for key, value in expected_audit.items()
     ):
         raise M3ParentError('M2 acceptance audit identity or decision is invalid.')
+    decision = audit.get('decision')
+    if decision not in _ALLOWED_M2_PARENT_DECISIONS:
+        raise M3ParentError('M2 acceptance audit identity or decision is invalid.')
+    if (
+        decision == 'ACCEPT_SHARED_M2_FOR_CANDIDATE_M3'
+        and audit.get('shared_m2') is not True
+    ):
+        raise M3ParentError('Shared M2 parent audit missing shared_m2=True.')
     if (
         not isinstance(audit.get('checkpoint_index'), int)
         or audit['checkpoint_index'] < 1

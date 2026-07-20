@@ -49,7 +49,11 @@ def build_m3_config_for_package(
     child_ids = read_json(Path(package_root) / 'child_run_ids.json')
     if not isinstance(over, dict) or not isinstance(child_ids, dict):
         raise S0SeriesError('Package missing m3_config_overrides or child_run_ids.')
-    from .m2_package_audit import read_package_m2_audit, write_package_m2_shared_audit
+    from .m2_package_audit import (
+        package_m2_audit_path,
+        read_package_m2_audit,
+        write_package_m2_shared_audit,
+    )
     from .m2_shared_registry import BINDING_READY, canonical_m2_run_id_for_package, read_binding
     m2_run_id = canonical_m2_run_id_for_package(package_root) or str(
         child_ids.get('M2') or ''
@@ -87,6 +91,11 @@ def build_m3_config_for_package(
                 project_root,
                 run_root=Path(persistent_root) / 'runs' / m2_run_id,
             )
+    # Shared package audit must be verified in place (never rewrite global audit).
+    if audit.get('shared_m2') is True or package_m2_audit_path(package_root).is_file():
+        parent_audit_path = str(package_m2_audit_path(package_root).resolve())
+    else:
+        parent_audit_path = 'audit/m2_accepted_parent.json'
     base = asdict(M3Config())
     base.update({
         'parent_run_id': audit['accepted_run_id'],
@@ -94,6 +103,7 @@ def build_m3_config_for_package(
         'parent_checkpoint_path': audit['checkpoint_path'],
         'parent_report_path': audit['m2_report_path'],
         'parent_acceptance_path': audit['m2_acceptance_path'],
+        'parent_audit_path': parent_audit_path,
         'j2_max': int(over['j2_max']),
         'sector_count': int(over['sector_count']),
         'operator_dimension': int(over['operator_dimension']),

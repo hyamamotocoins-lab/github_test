@@ -231,8 +231,9 @@ def write_child_m2_acceptance_audit(
         raise M7StagedLineageError('Child M2 is not acceptance-complete.')
 
     checkpoint_meta = report.get('checkpoint') or {}
-    checkpoint_path = Path(str(checkpoint_meta.get('path', '')))
-    if not checkpoint_path.is_dir():
+    raw_ckpt = str(checkpoint_meta.get('path') or '').strip()
+    checkpoint_path = Path(raw_ckpt) if raw_ckpt else Path()
+    if not raw_ckpt or not checkpoint_path.is_dir():
         # Fall back to latest committed checkpoint under the run.
         ckpt_root = run_root / 'checkpoints'
         candidates = sorted(

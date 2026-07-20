@@ -41,8 +41,9 @@ def write_package_m2_shared_audit(
         raise M2PackageAuditError('Shared M2 is not acceptance-complete.')
 
     checkpoint_meta = report.get('checkpoint') or {}
-    checkpoint_path = Path(str(checkpoint_meta.get('path', '')))
-    if not checkpoint_path.is_dir():
+    raw_ckpt = str(checkpoint_meta.get('path') or '').strip()
+    checkpoint_path = Path(raw_ckpt) if raw_ckpt else Path()
+    if not raw_ckpt or not checkpoint_path.is_dir():
         ckpt_root = run_root / 'checkpoints'
         candidates = sorted(
             path for path in ckpt_root.glob('ckpt_*')

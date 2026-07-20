@@ -82,8 +82,17 @@ class M3Config:
             raise ValueError('M3 parent report path is invalid.')
         if Path(self.parent_acceptance_path).name != 'M2_acceptance.json':
             raise ValueError('M3 parent acceptance path is invalid.')
-        if Path(self.parent_audit_path).as_posix() != 'audit/m2_accepted_parent.json':
-            raise ValueError('M3 audit path is fixed and may not be silently changed.')
+        audit_posix = Path(self.parent_audit_path).as_posix()
+        audit_name = Path(self.parent_audit_path).name
+        # Global project audit, or absolute package-local shared M2 audit.
+        if audit_posix != 'audit/m2_accepted_parent.json' and not (
+            Path(self.parent_audit_path).is_absolute()
+            and audit_name == 'm2_shared_parent.json'
+        ):
+            raise ValueError(
+                'M3 audit path must be audit/m2_accepted_parent.json or an '
+                'absolute path ending in audits/m2_shared_parent.json.'
+            )
         integers = (
             self.j2_max, self.sector_count, self.operator_dimension,
             self.target_rank, self.oversampling, self.power_iterations,

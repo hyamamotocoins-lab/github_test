@@ -307,6 +307,81 @@ def test_ensure_package_m2_run_id_syncs_from_binding(tmp_path: Path) -> None:
     assert child['M3'] == 'M3-x'
 
 
+def test_shared_package_audit_verifies_as_m3_parent(tmp_path: Path) -> None:
+    from src.m3_config import M3Config
+    from src.m3_parent import verify_accepted_m2_parent
+    from src.s0_series import build_m3_config_for_package
+    from tests.m3_helpers import make_synthetic_accepted_m2
+
+    base_config, project = make_synthetic_accepted_m2(
+        tmp_path, M3Config(require_cuda=False, j2_max=1),
+    )
+    persist = tmp_path / 'persist'
+    run_root = Path(base_config.parent_report_path).parents[1]
+    shared_id = 'M2-SHARED-test'
+    dest = persist / 'runs' / shared_id
+    dest.parent.mkdir(parents=True)
+    run_root.rename(dest)
+
+    report_path = dest / 'reports' / 'M2_report.json'
+    report = json.loads(report_path.read_text(encoding='utf-8'))
+    report['run_id'] = shared_id
+    # Force package audit writer to discover checkpoint under dest.
+    report.pop('checkpoint', None)
+    atomic_write_json(report_path, report)
+    manifest = json.loads((dest / 'run_manifest.json').read_text(encoding='utf-8'))
+    manifest['run_id'] = shared_id
+    atomic_write_json(dest / 'run_manifest.json', manifest)
+    state = json.loads(
+        (dest / 'checkpoints' / 'ckpt_000014' / 'state.json').read_text(encoding='utf-8')
+    )
+    state['run_id'] = shared_id
+    ckpt = dest / 'checkpoints' / 'ckpt_000014'
+    atomic_write_json(ckpt / 'state.json', state)
+    from src.common import sha256_file
+    hashes = {
+        path.relative_to(ckpt).as_posix(): sha256_file(path)
+        for path in ckpt.rglob('*')
+        if path.is_file() and path.name not in {'hashes.json', 'COMMITTED'}
+    }
+    atomic_write_json(ckpt / 'hashes.json', hashes)
+
+    pkg = tmp_path / 'pkg'
+    pkg.mkdir()
+    atomic_write_json(pkg / 'child_run_ids.json', {'M2': shared_id})
+    atomic_write_json(pkg / 'm3_config_overrides.json', {
+        'j2_max': 1,
+        'sector_count': 64,
+        'operator_dimension': 729,
+        'target_rank': 16,
+    })
+    atomic_write_json(pkg / 'm2_binding.json', {
+        'schema_version': 2,
+        'state': 'READY_SHARED',
+        'structural_key': 's' * 64,
+        'proof_key': 'p' * 64,
+        'canonical_run_id': shared_id,
+        'registry_record_sha256': 'r' * 64,
+        'mode': 'REUSE_SHARED',
+    })
+    audit = write_package_m2_shared_audit(
+        pkg,
+        run_root=dest,
+        structural_key='s' * 64,
+        proof_key='p' * 64,
+        registry_record_sha256='r' * 64,
+    )
+    assert audit['decision'] == 'ACCEPT_SHARED_M2_FOR_CANDIDATE_M3'
+    assert audit['shared_m2'] is True
+
+    cfg = build_m3_config_for_package(project, pkg, persist)
+    assert Path(cfg.parent_audit_path).is_absolute()
+    assert Path(cfg.parent_audit_path).name == 'm2_shared_parent.json'
+    assert cfg.parent_run_id == shared_id
+    evidence = verify_accepted_m2_parent(project, cfg)
+    assert len(evidence.projector_tensors) == 64
+
+
 def test_package_audits_do_not_clobber(tmp_path: Path) -> None:
     persist = tmp_path / 'persist'
     run = persist / 'runs' / 'M2-shared'
