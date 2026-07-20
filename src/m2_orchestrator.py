@@ -309,6 +309,7 @@ class M2Orchestrator:
         keys = self._sector_keys_for_item(item)
         dense_index = self._load_done_sector_index('M2_DENSE_REFERENCE')
         armillary_index = self._load_done_sector_index('M2_ARMILLARY')
+        sectors_out: list[dict[str, Any]] = []
         for key in keys:
             reps = key.representations
             dense = dense_index.get(reps)
@@ -318,6 +319,11 @@ class M2Orchestrator:
             )
             if dense is None or armillary is None:
                 mismatches.append(list(reps))
+                sectors_out.append({
+                    'reps': list(reps),
+                    'matched': False,
+                    'reason': 'missing_dense_or_armillary_artifact',
+                })
                 continue
             mu = int(dense.get('singlet_multiplicity', -1))
             rank = int(armillary.get('singlet_rank', -2))
@@ -332,8 +338,20 @@ class M2Orchestrator:
             )
             if same:
                 matches += 1
+                sectors_out.append({
+                    'reps': list(reps),
+                    'matched': True,
+                    'singlet_rank': rank,
+                    'independent_singlet_multiplicity': independent,
+                })
             else:
                 mismatches.append(list(reps))
+                sectors_out.append({
+                    'reps': list(reps),
+                    'matched': False,
+                    'singlet_rank': rank,
+                    'independent_singlet_multiplicity': independent,
+                })
         if 'batch_index' not in item.parameters:
             expected = expected_m2_gate_counts(self.config.j2_max)
             if mismatches or matches != expected['exact_match_count']:
@@ -350,6 +368,7 @@ class M2Orchestrator:
             'max_dense_dimension': max_dimension,
             'comparison': 'exact invariant-subspace uniqueness certificate',
             'proof_method': self.config.proof_method,
+            'sectors': sectors_out,
         }
         if 'batch_index' in item.parameters:
             payload.update({

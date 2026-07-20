@@ -163,14 +163,36 @@ def merge_m2_batch_payloads(
         )
         tensor_count += int(result.get('checkpoint_tensor_count') or 0)
 
-    if len(sectors) != expected['sector_count']:
-        raise RuntimeError(
-            f'{phase} merged sector_count {len(sectors)} != '
-            f"{expected['sector_count']}",
-        )
+    counted_sectors = sum(
+        int((payload.get('result') or {}).get('sector_count') or 0)
+        for payload in ordered
+    )
+    if phase == 'M2_EQUIVALENCE':
+        # Equivalence batches historically store counts/mismatches only (no
+        # per-sector bodies). Prefer explicit sector rows when present; else
+        # validate via sector_count / exact_match_count sums.
+        if sectors and len(sectors) != expected['sector_count']:
+            raise RuntimeError(
+                f'{phase} merged sector_count {len(sectors)} != '
+                f"{expected['sector_count']}",
+            )
+        if counted_sectors != expected['sector_count']:
+            raise RuntimeError(
+                f'{phase} merged sector_count {counted_sectors} != '
+                f"{expected['sector_count']}",
+            )
+        sector_count = counted_sectors
+    else:
+        if len(sectors) != expected['sector_count']:
+            raise RuntimeError(
+                f'{phase} merged sector_count {len(sectors)} != '
+                f"{expected['sector_count']}",
+            )
+        sector_count = len(sectors)
+
     merged_result: dict[str, Any] = {
         'status': 'PASS',
-        'sector_count': len(sectors),
+        'sector_count': sector_count,
         'sectors': sectors,
         'batched': True,
         'n_batches': len(ordered),

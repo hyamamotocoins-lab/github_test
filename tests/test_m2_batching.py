@@ -144,3 +144,41 @@ def test_batch_plan_and_merge_dense() -> None:
     assert merged['result']['sector_count'] == 729
     assert merged['result']['generator_residual_zero_count'] == 729
     assert merged['result']['odd_half_zero_count'] == 364
+
+
+def test_merge_equivalence_accepts_count_only_batches() -> None:
+    """Existing v2 runs stored equivalence counts without sector bodies."""
+    payloads = []
+    remaining = 729
+    batch_size = 200
+    batch_index = 0
+    while remaining > 0:
+        size = min(batch_size, remaining)
+        remaining -= size
+        payloads.append({
+            'schema_version': 1,
+            'milestone': 'M2',
+            'phase': 'M2_EQUIVALENCE',
+            'item_id': f'eq{batch_index}',
+            'config_hash': 'b' * 64,
+            'certification_status': 'NOT_CERTIFIED',
+            'generated_at': '2026-07-20T00:00:00Z',
+            'result': {
+                'status': 'PASS',
+                'sector_count': size,
+                'exact_match_count': size,
+                'mismatches': [],
+                'max_dense_dimension': 729,
+                'comparison': 'exact invariant-subspace uniqueness certificate',
+                'batch_index': batch_index,
+                'batch_start': batch_index * batch_size,
+                'partial': True,
+                # intentionally no 'sectors'
+            },
+        })
+        batch_index += 1
+    merged = merge_m2_batch_payloads('M2_EQUIVALENCE', payloads, j2_max=2)
+    assert merged['result']['sector_count'] == 729
+    assert merged['result']['exact_match_count'] == 729
+    assert merged['result']['mismatches'] == []
+    assert merged['result']['sectors'] == []
