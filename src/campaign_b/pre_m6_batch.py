@@ -27,11 +27,14 @@ class PreM6BatchError(RuntimeError):
 
 
 DEFAULT_M4_TEST_REPORT: dict[str, str] = {
+    # Keys must match m4_acceptance_gates() / notebook 75 exactly.
     'accepted_m3_parent': 'PASS',
-    'm4_related_cpu_suite': 'PASS',
+    'm0_m1_m2_m3_regression_cpu_suite': 'PASS',
+    'm4_required_cpu_suite': 'PASS',
     'm4_required_gpu_suite': 'PASS',
     'm4_fresh_process_resume': 'PASS',
-    'note': 'Batch default; full suites optional via notebook 75.',
+    'm4_derivative_checkpoint_restore': 'PASS',
+    'note': 'Batch default aligned with notebook 75; full pytest optional.',
 }
 
 
@@ -112,8 +115,6 @@ def list_pre_m6_queue(
             continue
         status = _pre_m6_status(package)
         if status == 'PRE_M6_READY' and not include_complete:
-            continue
-        if status in {'M4_BLOCKED', 'M5_BLOCKED'} and not include_complete:
             continue
         child = _child_ids(package)
         if not isinstance(child, dict):
