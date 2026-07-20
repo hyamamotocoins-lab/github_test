@@ -329,16 +329,15 @@ class M7Orchestrator:
         else:
             package_root = Path(parent_info['package_root'])
             parent_m5_q = None
-            m5_id = parent_info.get('acceptance', {}).get('parent_m5_run_id')
-            # Prefer q from M6 verdict equality check vs M5 acceptance if present.
-            m6_q = None
             verdict = read_json(package_root / 'verdict.json')
-            if isinstance(verdict, dict) and verdict.get('q_cert_upper'):
-                m6_q = Fraction(str(verdict['q_cert_upper']))
+            # Prefer exact rational from final_bound.json over long decimal strings.
+            bound = read_json(package_root / 'final_bound.json')
+            if isinstance(bound, dict) and isinstance(bound.get('q_cert'), dict):
+                hi = bound['q_cert'].get('hi')
+                if isinstance(hi, dict):
+                    # used only for diagnosis equality; diagnose reads bound itself
+                    pass
             acc = parent_info.get('acceptance')
-            # M6 acceptance may embed parent q indirectly; compare to M5 file if exists.
-            m5_run = self.persistent_root / 'runs' / self.config.parent_m6_run_id
-            # parent_m5 from M6 acceptance
             if isinstance(acc, dict) and acc.get('parent_m5_run_id'):
                 m5_acc = (
                     self.persistent_root / 'runs' / acc['parent_m5_run_id']
@@ -346,8 +345,19 @@ class M7Orchestrator:
                 )
                 if m5_acc.is_file():
                     m5_doc = read_json(m5_acc)
-                    if isinstance(m5_doc, dict) and m5_doc.get('q_cert_upper'):
-                        parent_m5_q = Fraction(str(m5_doc['q_cert_upper']))
+                    if isinstance(m5_doc, dict):
+                        # Prefer hex rational if present; else short float approx.
+                        if isinstance(m5_doc.get('q_cert_upper_rational'), dict):
+                            parent_m5_q = fraction_from_payload(
+                                m5_doc['q_cert_upper_rational']
+                            )
+                        elif m5_doc.get('q_cert_upper') is not None:
+                            raw = str(m5_doc['q_cert_upper'])
+                            parent_m5_q = (
+                                Fraction(raw)
+                                if len(raw) <= 200
+                                else Fraction.from_float(float(raw))
+                            )
 
         diagnosis = diagnose_m6_package(package_root, parent_m5_q=parent_m5_q)
         reports = self.search_root / 'reports'
@@ -413,6 +423,7 @@ class M7Orchestrator:
             ranking.append({
                 'candidate_id': candidate['candidate_id'],
                 'q_cert_upper': result['q_cert_upper'],
+                'q_cert_upper_rational': result['q_cert_upper_rational'],
                 'certified': result['certified'],
                 'change_class': candidate['change_class'],
                 'scheme': candidate['scheme'],
@@ -431,7 +442,7 @@ class M7Orchestrator:
 
         ranking_sorted = sorted(
             ranking,
-            key=lambda row: Fraction(str(row['q_cert_upper'])),
+            key=lambda row: fraction_from_payload(row['q_cert_upper_rational']),
         )
         atomic_write_json(reports / 'candidate_ranking.json', {
             'schema_version': 1,

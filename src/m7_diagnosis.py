@@ -44,10 +44,18 @@ def diagnose_m6_package(
 
     q_hi = None
     q_payload = final_bound.get('q_cert')
-    if isinstance(q_payload, dict):
+    if isinstance(q_payload, dict) and 'hi' in q_payload:
         q_hi = _interval_hi(q_payload)
     if q_hi is None and verdict.get('q_cert_upper'):
-        q_hi = Fraction(str(verdict['q_cert_upper']))
+        raw = str(verdict['q_cert_upper'])
+        # Avoid Fraction(long decimal) on Python 3.11 digit-limit.
+        if len(raw) <= 200:
+            try:
+                q_hi = Fraction(raw)
+            except (ValueError, ZeroDivisionError):
+                q_hi = Fraction.from_float(float(raw))
+        else:
+            q_hi = Fraction.from_float(float(raw))
 
     policy = None
     if isinstance(run_config, dict):

@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from .common import read_json
-from .exact_arithmetic import fraction_decimal_text, fraction_from_payload
+from .exact_arithmetic import fraction_from_payload
 from .interval_kernel import construct
 from .m5_package import make_contractive_fixture_inputs
+from .m6_status import CERTIFIED
 from .m7_collatz_search import (
     coerce_interval,
     diagonal_plus_l1_tail,
@@ -18,7 +19,6 @@ from .m7_collatz_search import (
     matrix_midpoints,
     power_iteration_perron,
 )
-from .m6_status import CERTIFIED
 from .m7_status import SCHEME_REJECTED
 
 
@@ -142,6 +142,8 @@ def evaluate_candidate_rigorous(
 
 def _pack(candidate: dict[str, Any], result: dict[str, Any], *, notes: str) -> dict[str, Any]:
     certified = bool(result['certified'])
+    q_lo = result['q_cert_lo']
+    q_hi = result['q_cert_hi']
     return {
         'schema_version': 1,
         'candidate_id': candidate.get('candidate_id'),
@@ -149,9 +151,19 @@ def _pack(candidate: dict[str, Any], result: dict[str, Any], *, notes: str) -> d
         'change_class': candidate.get('change_class'),
         'scheme': candidate.get('scheme'),
         'notes': notes,
-        'q_cert_lower': fraction_decimal_text(result['q_cert_lo']),
-        'q_cert_upper': fraction_decimal_text(result['q_cert_hi']),
-        'q_collatz_upper': fraction_decimal_text(result['q_collatz_hi']),
+        # Exact endpoints as hex rationals (safe to round-trip on Py3.11).
+        'q_cert_lower_rational': {
+            'numerator_hex': format(q_lo.numerator, 'x'),
+            'denominator_hex': format(q_lo.denominator, 'x'),
+        },
+        'q_cert_upper_rational': {
+            'numerator_hex': format(q_hi.numerator, 'x'),
+            'denominator_hex': format(q_hi.denominator, 'x'),
+        },
+        # Short display only — do not parse these back with Fraction().
+        'q_cert_lower': format(float(q_lo), '.17g'),
+        'q_cert_upper': format(float(q_hi), '.17g'),
+        'q_collatz_upper': format(float(result['q_collatz_hi']), '.17g'),
         'collatz_verdict': result['verdict'],
         'status': 'M6_CERTIFIED' if certified else 'M6_NOT_CERTIFIED',
         'scheme_result': CERTIFIED if certified else SCHEME_REJECTED,
