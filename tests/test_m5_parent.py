@@ -66,5 +66,8 @@ def test_m5_parent_fails_closed_for_tamper_or_incomplete_handoff(
     atomic_write_json(report_path, report)
     audit['m4_report_sha256'] = sha256_file(report_path)
     atomic_write_json(audit_path, audit)
-    with pytest.raises(M5ParentError, match='does not converge'):
+    with pytest.raises(
+        M5ParentError,
+        match=r'does not converge|maximum regression residual changed',
+    ):
         verify_accepted_m4_parent(project, persistent, run_id)

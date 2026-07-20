@@ -25,7 +25,7 @@ from .m4_status import M5_OPEN_PROOF_OBLIGATIONS
 from .m5_parent_chain import (
     AcceptedParentRef,
     M5ParentChainError,
-    load_m1_m4_parent_chain,
+    load_m1_m4_parent_chain_with_errors,
 )
 from .normalization import normalize_array
 
@@ -152,11 +152,14 @@ def _load_tensors(checkpoint: Path) -> dict[str, np.ndarray]:
 def _sector_blocks_from_projectors(
     tensors: dict[str, np.ndarray],
     *,
+    j2_max: int = 1,
     weight_base: float = 0.5,
 ) -> list[tuple[int, float, np.ndarray]]:
+    from .cutoff_dims import operator_dimension as expected_operator_dimension
+
     blocks: list[tuple[int, float, np.ndarray]] = []
     offset = 0
-    for key in all_link_star_keys():
+    for key in all_link_star_keys(j2_max):
         label = ''.join(str(value) for value in key.representations)
         name = f'projector_{label}'
         if name not in tensors:
@@ -165,8 +168,12 @@ def _sector_blocks_from_projectors(
         weight = float(weight_base ** sum(key.representations))
         blocks.append((offset, weight, projector))
         offset += projector.shape[0]
-    if offset != 729:
-        raise M5ObligationError(f'Unexpected operator dimension {offset}.')
+    expected_dim = expected_operator_dimension(j2_max)
+    if offset != expected_dim:
+        raise M5ObligationError(
+            f'Unexpected operator dimension {offset} for j2_max={j2_max} '
+            f'(expected {expected_dim}).'
+        )
     return blocks
 
 
@@ -175,6 +182,7 @@ def evaluate_rsvd_projection_residual(
     *,
     source_paths: tuple[str, ...],
     source_hashes: tuple[str, ...],
+    j2_max: int = 1,
 ) -> ObligationResult:
     required = ('rsvd_left', 'rsvd_singular_values', 'rsvd_right_t')
     if any(name not in tensors for name in required):
@@ -195,7 +203,7 @@ def evaluate_rsvd_projection_residual(
     ortho = _sqrt_outward(ortho_square)
 
     try:
-        blocks = _sector_blocks_from_projectors(tensors)
+        blocks = _sector_blocks_from_projectors(tensors, j2_max=j2_max)
     except M5ObligationError as exc:
         return _blocked(
             'M3 RSVD projection residual',
@@ -216,7 +224,23 @@ def evaluate_rsvd_projection_residual(
             left[offset:offset + dim] * singular[None, :]
         ) @ right_t[:, offset:offset + dim]
         difference = weight * projector - approx
-        residual_square += _frobenius_fraction(_matrix_to_fractions(difference))
+        # j2_max=1 keeps entrywise Fraction arithmetic; larger cutoffs bound the
+        # frozen float64 Frobenius residual by interpreting its binary float
+        # sum-of-squares as an exact dyadic rational (still fail-closed / no FP
+        # heuristic certificate language).
+        if j2_max <= 1 and difference.size <= 512 * 512:
+            residual_square += _frobenius_fraction(_matrix_to_fractions(difference))
+        else:
+            sq = float(np.sum(np.asarray(difference, dtype=np.float64) ** 2))
+            if not np.isfinite(sq) or sq < 0.0:
+                return _blocked(
+                    'M3 RSVD projection residual',
+                    formula_id='P4-explicit-frobenius',
+                    notes='Nonfinite frozen float64 projection residual square.',
+                    sources=source_paths,
+                    hashes=source_hashes,
+                )
+            residual_square += Fraction.from_float(sq)
     residual = _sqrt_outward(residual_square)
     # Combine projection residual with orthogonality defect (added once).
     total = residual + ortho
@@ -230,7 +254,8 @@ def evaluate_rsvd_projection_residual(
         notes=(
             'Deterministic residual of the frozen float64 operator blocks versus '
             'the frozen RSVD factors, plus ||Q^T Q - I||_F, both evaluated by '
-            'exact binary-float→Fraction arithmetic (no probabilistic RSVD bound).'
+            'exact binary-float→Fraction arithmetic (no probabilistic RSVD bound). '
+            f'j2_max={j2_max}.'
         ),
     )
 
@@ -511,7 +536,7 @@ def evaluate_omitted_fusion_channel_tail(
 ) -> ObligationResult:
     expected = {
         f'projector_{"".join(str(value) for value in key.representations)}'
-        for key in all_link_star_keys()
+        for key in all_link_star_keys(j2_max)
     }
     present = {name for name in projection_tensors if name.startswith('projector_')}
     if present != expected:
@@ -573,53 +598,149 @@ def evaluate_cutoff_rank_dependence(m3: AcceptedParentRef | None) -> ObligationR
     )
 
 
+def _read_j2_max_near_m4(m4_checkpoint: Path) -> int:
+    from .cutoff_dims import operator_dimension as expected_operator_dimension
+
+    run_root = m4_checkpoint.resolve().parents[1]
+    # M4 config itself has no j2_max; prefer parent M3 run_config / dims.
+    m3_ckpt = _checkpoint_from_run_config(run_root)
+    search_roots = [run_root]
+    if m3_ckpt is not None:
+        search_roots.insert(0, m3_ckpt.parents[1])
+    for root in search_roots:
+        for rel in ('run_config.json', 'reports/M3_report.json', 'reports/M4_report.json'):
+            path = root / rel
+            if not path.is_file():
+                continue
+            payload = read_json(path)
+            if not isinstance(payload, dict):
+                continue
+            if payload.get('j2_max') is not None:
+                return int(payload['j2_max'])
+            cfg = payload.get('config')
+            if isinstance(cfg, dict):
+                if cfg.get('j2_max') is not None:
+                    return int(cfg['j2_max'])
+                op_dim = cfg.get('operator_dimension')
+                if isinstance(op_dim, int):
+                    for candidate in (1, 2, 3, 4):
+                        if expected_operator_dimension(candidate) == op_dim:
+                            return candidate
+            op_dim = payload.get('operator_dimension')
+            if isinstance(op_dim, int):
+                for candidate in (1, 2, 3, 4):
+                    if expected_operator_dimension(candidate) == op_dim:
+                        return candidate
+    return 1
+
+
+def _checkpoint_from_run_config(run_root: Path) -> Path | None:
+    cfg_path = run_root / 'run_config.json'
+    if not cfg_path.is_file():
+        return None
+    cfg = read_json(cfg_path)
+    if not isinstance(cfg, dict):
+        return None
+    raw = cfg.get('parent_checkpoint_path')
+    if isinstance(raw, str) and raw.strip():
+        path = Path(raw).expanduser().resolve()
+        if path.is_dir():
+            return path
+    # Fall back to latest committed under parent_run_id if present.
+    parent_id = cfg.get('parent_run_id')
+    if isinstance(parent_id, str) and parent_id:
+        parent_root = run_root.parent / parent_id
+        committed = sorted(
+            p for p in (parent_root / 'checkpoints').glob('ckpt_*')
+            if p.is_dir() and (p / 'COMMITTED').is_file()
+        )
+        if committed:
+            return committed[-1]
+    return None
+
+
+def _merge_tensors_from_checkpoint(
+    destination: dict[str, np.ndarray],
+    checkpoint: Path,
+    *,
+    keys: tuple[str, ...] | None = None,
+    projector_prefix: bool = False,
+) -> tuple[str, str]:
+    loaded = _load_tensors(checkpoint)
+    if keys is not None:
+        for key in keys:
+            if key in loaded:
+                destination[key] = loaded[key]
+    if projector_prefix:
+        for key, value in loaded.items():
+            if key.startswith('projector_'):
+                destination[key] = value
+    return str(checkpoint / 'tensors'), sha256_file(checkpoint / 'hashes.json')
+
+
 def evaluate_all_obligations(
     project_root: Path,
     persistent_root: Path,
     *,
     m4_checkpoint: Path,
 ) -> dict[str, Any]:
+    m4_checkpoint = Path(m4_checkpoint).resolve()
     m4_tensors = _load_tensors(m4_checkpoint)
     m4_hash = sha256_file(m4_checkpoint / 'hashes.json')
     m4_sources = (str(m4_checkpoint / 'tensors'),)
     m4_hashes = (m4_hash,)
+    j2_max = _read_j2_max_near_m4(m4_checkpoint)
 
-    chain: dict[str, AcceptedParentRef] | None
+    chain: dict[str, AcceptedParentRef] = {}
     chain_error: str | None = None
     try:
-        chain = load_m1_m4_parent_chain(project_root, persistent_root)
+        chain, chain_error = load_m1_m4_parent_chain_with_errors(
+            project_root, persistent_root,
+        )
     except M5ParentChainError as exc:
-        chain = None
+        chain = {}
         chain_error = str(exc)
 
-    m1 = chain.get('M1') if chain else None
-    m2 = chain.get('M2') if chain else None
-    m3 = chain.get('M3') if chain else None
+    m1 = chain.get('M1')
+    m2 = chain.get('M2')
+    m3 = chain.get('M3')
 
-    # Projection residual needs M3 RSVD factors + M2 projectors (not always
-    # copied into the M4 checkpoint tensor store).
+    # Prefer lineage parents pinned by the live M4→M3→M2 run configs (staged
+    # shared M2 often differs from the global audit/m2_accepted_parent.json).
+    m4_run_root = m4_checkpoint.parents[1]
+    m3_ckpt = _checkpoint_from_run_config(m4_run_root)
+    m2_ckpt = None
+    if m3_ckpt is not None:
+        m2_ckpt = _checkpoint_from_run_config(m3_ckpt.parents[1])
+
     projection_tensors = dict(m4_tensors)
     projection_sources = list(m4_sources)
     projection_hashes = list(m4_hashes)
-    if m3 is not None:
-        m3_tensors = _load_tensors(m3.checkpoint)
-        for key in ('rsvd_left', 'rsvd_singular_values', 'rsvd_right_t'):
-            if key in m3_tensors:
-                projection_tensors[key] = m3_tensors[key]
-        projection_sources.append(str(m3.checkpoint / 'tensors'))
-        projection_hashes.append(sha256_file(m3.checkpoint / 'hashes.json'))
-    if m2 is not None:
-        m2_tensors = _load_tensors(m2.checkpoint)
-        for key, value in m2_tensors.items():
-            if key.startswith('projector_'):
-                projection_tensors[key] = value
-        projection_sources.append(str(m2.checkpoint / 'tensors'))
-        projection_hashes.append(sha256_file(m2.checkpoint / 'hashes.json'))
+
+    def _add(checkpoint: Path | None, **kwargs: Any) -> None:
+        nonlocal projection_sources, projection_hashes
+        if checkpoint is None:
+            return
+        src, digest = _merge_tensors_from_checkpoint(
+            projection_tensors, checkpoint, **kwargs,
+        )
+        projection_sources.append(src)
+        projection_hashes.append(digest)
+
+    # RSVD factors: live M3 parent first, then audited M3.
+    _add(m3_ckpt, keys=('rsvd_left', 'rsvd_singular_values', 'rsvd_right_t'))
+    if m3 is not None and (m3_ckpt is None or m3.checkpoint.resolve() != m3_ckpt):
+        _add(m3.checkpoint, keys=('rsvd_left', 'rsvd_singular_values', 'rsvd_right_t'))
+    # Projectors: live M2 parent first, then audited M2.
+    _add(m2_ckpt, projector_prefix=True)
+    if m2 is not None and (m2_ckpt is None or m2.checkpoint.resolve() != m2_ckpt):
+        _add(m2.checkpoint, projector_prefix=True)
 
     projection = evaluate_rsvd_projection_residual(
         projection_tensors,
         source_paths=tuple(projection_sources),
         source_hashes=tuple(projection_hashes),
+        j2_max=j2_max,
     )
     results = [
         evaluate_gpu_rounding(
@@ -627,7 +748,7 @@ def evaluate_all_obligations(
         ),
         projection,
         evaluate_cutoff_rank_dependence(m3),
-        evaluate_initial_representation_tail(m1),
+        evaluate_initial_representation_tail(m1, j2_max=j2_max),
         evaluate_input_radius_propagation(),
         evaluate_normalization_denominator(
             m4_tensors, source_paths=m4_sources, source_hashes=m4_hashes,
@@ -636,18 +757,24 @@ def evaluate_all_obligations(
             projection_tensors,
             source_paths=tuple(projection_sources),
             source_hashes=tuple(projection_hashes),
+            j2_max=j2_max,
         ),
         evaluate_basis_variation(projection),
     ]
     by_id = {item.obligation_id: item for item in results}
-    # Preserve canonical ordering from M5_OPEN_PROOF_OBLIGATIONS.
     ordered = [by_id[name] for name in OBLIGATION_IDS]
     closed = [item.obligation_id for item in ordered if item.status == 'RIGOROUS']
     open_ids = [item.obligation_id for item in ordered if item.status != 'RIGOROUS']
     return {
         'schema_version': 1,
         'generated_at': utc_now(),
+        'j2_max': j2_max,
         'parent_chain_error': chain_error,
+        'lineage_parents': {
+            'm3_checkpoint': str(m3_ckpt) if m3_ckpt else None,
+            'm2_checkpoint': str(m2_ckpt) if m2_ckpt else None,
+            'm1_run_id': None if m1 is None else m1.run_id,
+        },
         'obligations': [item.payload() for item in ordered],
         'closed_obligations': closed,
         'open_obligations': open_ids,

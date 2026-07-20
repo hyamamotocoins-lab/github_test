@@ -53,12 +53,37 @@ def load_accepted_parent(
     run_root = persistent_root.resolve() / 'runs' / run_id
     if run_root.is_symlink() or not run_root.is_dir():
         raise M5ParentChainError(f'{milestone} run root is missing: {run_root}')
-    checkpoint = run_root / 'checkpoints' / 'ckpt_000014'
     report_name = f'{milestone}_report.json'
     report_path = run_root / 'reports' / report_name
     _require_file(report_path, f'{milestone} report')
-    if not checkpoint.is_dir() or checkpoint.is_symlink():
-        raise M5ParentChainError(f'{milestone} checkpoint is missing: {checkpoint}')
+
+    checkpoint: Path | None = None
+    audited_ckpt = audit.get('checkpoint_path')
+    if isinstance(audited_ckpt, str) and audited_ckpt.strip():
+        candidate = Path(audited_ckpt).expanduser().resolve()
+        try:
+            candidate.relative_to(run_root.resolve())
+        except ValueError as exc:
+            raise M5ParentChainError(
+                f'{milestone} audit checkpoint escapes run root.'
+            ) from exc
+        if candidate.is_dir() and not candidate.is_symlink():
+            checkpoint = candidate
+    if checkpoint is None:
+        # Prefer latest committed checkpoint (staged M4 often exceeds ckpt_000014).
+        committed = sorted(
+            path for path in (run_root / 'checkpoints').glob('ckpt_*')
+            if path.is_dir() and (path / 'COMMITTED').is_file()
+        )
+        if committed:
+            checkpoint = committed[-1]
+        else:
+            fallback = run_root / 'checkpoints' / 'ckpt_000014'
+            if fallback.is_dir() and not fallback.is_symlink():
+                checkpoint = fallback
+    if checkpoint is None:
+        raise M5ParentChainError(f'{milestone} checkpoint is missing under {run_root}')
+
     expected_report = audit.get(f'{milestone.lower()}_report_path')
     if isinstance(expected_report, str):
         if Path(expected_report).resolve() != report_path.resolve():
@@ -77,30 +102,40 @@ def load_accepted_parent(
     )
 
 
+def load_m1_m4_parent_chain_with_errors(
+    project_root: Path,
+    persistent_root: Path,
+) -> tuple[dict[str, AcceptedParentRef], str | None]:
+    """Load M1–M4 parents independently; return soft error notes for missing ones."""
+    chain: dict[str, AcceptedParentRef] = {}
+    errors: list[str] = []
+    for milestone, relative in (
+        ('M1', 'audit/m1_accepted_parent.json'),
+        ('M2', 'audit/m2_accepted_parent.json'),
+        ('M3', 'audit/m3_accepted_parent.json'),
+        ('M4', 'audit/m4_accepted_parent.json'),
+    ):
+        try:
+            chain[milestone] = load_accepted_parent(
+                project_root, persistent_root,
+                audit_relative=relative,
+                milestone=milestone,
+            )
+        except M5ParentChainError as exc:
+            errors.append(f'{milestone}: {exc}')
+    if not chain and errors:
+        raise M5ParentChainError(
+            'No accepted M1–M4 parents could be loaded: ' + '; '.join(errors)
+        )
+    return chain, ('; '.join(errors) if errors else None)
+
+
 def load_m1_m4_parent_chain(
     project_root: Path,
     persistent_root: Path,
 ) -> dict[str, AcceptedParentRef]:
-    """Load M1–M4 accepted parents. Missing optional ancestors raise clearly."""
-    return {
-        'M1': load_accepted_parent(
-            project_root, persistent_root,
-            audit_relative='audit/m1_accepted_parent.json',
-            milestone='M1',
-        ),
-        'M2': load_accepted_parent(
-            project_root, persistent_root,
-            audit_relative='audit/m2_accepted_parent.json',
-            milestone='M2',
-        ),
-        'M3': load_accepted_parent(
-            project_root, persistent_root,
-            audit_relative='audit/m3_accepted_parent.json',
-            milestone='M3',
-        ),
-        'M4': load_accepted_parent(
-            project_root, persistent_root,
-            audit_relative='audit/m4_accepted_parent.json',
-            milestone='M4',
-        ),
-    }
+    """Load M1–M4 accepted parents (partial chain allowed)."""
+    chain, _errors = load_m1_m4_parent_chain_with_errors(
+        project_root, persistent_root,
+    )
+    return chain

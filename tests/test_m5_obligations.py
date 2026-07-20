@@ -79,14 +79,87 @@ def test_omitted_channel_closes_on_full_projector_cover() -> None:
     }
     result = evaluate_omitted_fusion_channel_tail(
         tensors, source_paths=('synthetic',), source_hashes=('d' * 64,),
+        j2_max=1,
     )
     assert result.status == 'RIGOROUS'
     incomplete = evaluate_omitted_fusion_channel_tail(
         {}, source_paths=('synthetic',), source_hashes=('e' * 64,),
+        j2_max=1,
     )
     assert incomplete.status == 'BLOCKED_MATH'
+
+
+def test_omitted_channel_respects_j2_max() -> None:
+    tensors = {
+        f'projector_{"".join(str(v) for v in key.representations)}': np.eye(1)
+        for key in all_link_star_keys(1)
+    }
+    result = evaluate_omitted_fusion_channel_tail(
+        tensors, source_paths=('synthetic',), source_hashes=('f' * 64,),
+        j2_max=2,
+    )
+    assert result.status == 'BLOCKED_MATH'
 
 
 def test_initial_tail_blocks_without_m1() -> None:
     result = evaluate_initial_representation_tail(None)
     assert result.status == 'BLOCKED_MATH'
+
+
+def test_initial_tail_blocks_when_cutoff_too_low(tmp_path) -> None:
+    from src.m5_parent_chain import AcceptedParentRef
+
+    report = tmp_path / 'M1_report.json'
+    # Only cutoff 1 available; j2_max=2 needs N>=3.
+    atomic_write = __import__('src.common', fromlist=['atomic_write_json']).atomic_write_json
+    atomic_write(report, {
+        'results': {
+            'M1_VALUE_TAIL': {
+                'result': {
+                    'rigor': 'RIGOROUS_RATIONAL_ANALYTIC_BOUND',
+                    'entries': {
+                        '1': {'tail': {'hi': {'numer': '1', 'denom': '10'}}},
+                    },
+                },
+            },
+            'M1_GRADIENT_TAIL': {
+                'result': {
+                    'entries': {
+                        '1': {'tail': {'hi': {'numer': '1', 'denom': '10'}}},
+                    },
+                },
+            },
+        },
+    })
+    m1 = AcceptedParentRef(
+        milestone='M1',
+        run_id='M1-synthetic',
+        audit_path=tmp_path / 'audit.json',
+        audit={},
+        run_root=tmp_path,
+        checkpoint=tmp_path,
+        report_path=report,
+    )
+    result = evaluate_initial_representation_tail(m1, j2_max=2)
+    assert result.status == 'BLOCKED_MATH'
+    assert 'No M1 value-tail cutoff' in (result.notes or '')
+
+
+def test_read_j2_max_from_parent_m3_config(tmp_path) -> None:
+    from src.common import atomic_write_json
+    from src.m5_obligations import _read_j2_max_near_m4
+
+    m4_run = tmp_path / 'runs' / 'M4-child'
+    m3_run = tmp_path / 'runs' / 'M3-parent'
+    m3_ckpt = m3_run / 'checkpoints' / 'ckpt_000010'
+    m3_ckpt.mkdir(parents=True)
+    (m3_ckpt / 'COMMITTED').write_text('ok', encoding='utf-8')
+    m4_ckpt = m4_run / 'checkpoints' / 'ckpt_000027'
+    m4_ckpt.mkdir(parents=True)
+    atomic_write_json(m4_run / 'run_config.json', {
+        'parent_run_id': 'M3-parent',
+        'parent_checkpoint_path': str(m3_ckpt),
+    })
+    atomic_write_json(m3_run / 'run_config.json', {'j2_max': 2})
+    assert _read_j2_max_near_m4(m4_ckpt) == 2
+
