@@ -1,0 +1,47 @@
+schema_version: 1
+campaign: B_S2
+campaign_kind: B_S2
+persistent_root: /storage/validated_4d_su2_rg
+search_space_path: campaign_b_s2_space_expanded_v1.yaml
+time_budget_sec: 21600
+time_budget:
+  hard_limit_sec: 21600
+  admission_close_sec: 19500
+  finalization_start_sec: 20100
+  emergency_flush_sec: 300
+  enforce_wall_clock: false
+inherit_deadline: false
+screening_margin: 0.000001
+parent_q_upper: 1.011045
+parent_rank: 16
+parent_m6_run_id: PARENT-M6-FROM-C-EXHAUSTED
+parent_scheme_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+lease_sec: 1800
+source_tree_roots: [src]
+execution_policy:
+  staged_only: true
+  minimum_j2: 2
+  allow_campaign_c: false
+  allow_production_m6: false
+  certification_status: NOT_CERTIFIED
+  claim_scope: SCREENING_ONLY
+shared_m2:
+  allow_generate_canonical: true
+  on_missing: auto_generate
+  j2_max: 2
+never_stop: true
+stop_after_first_verified_q_lt_1: false
+independent_verifier:
+  q_atol: 1.0e-9
+  q_rtol: 1.0e-6
+parent_evidence:
+  campaign_c_status: CAMPAIGN_C_S3_EXHAUSTED_GOTO_B
+  campaign_c_best_q: 1.011
+  campaign_c_evidence_hash: pending
+mass_explore:
+  max_waves: 8
+  candidates_per_wave: null
+  skip_seen_schemes: true
+  space_paths:
+    - campaign_b_s2_space_v1.yaml
+    - campaign_b_s2_space_expanded_v1.yaml

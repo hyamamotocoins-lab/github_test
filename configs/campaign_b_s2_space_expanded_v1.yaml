@@ -1,0 +1,28 @@
+schema_version: 1
+campaign: B_S2
+
+# Expanded finite B/S2 space for mass autonomous exploration.
+# Still S2-only; no Campaign C layers; j2>=2 only.
+
+rank:
+  values: [16, 25, 36, 49, 64, 81, 100]
+
+rsvd:
+  oversampling: [8, 12, 16, 20, 24, 32]
+  power_iterations: [1, 2, 3, 4]
+  seeds: [20260720, 20260721, 20260722, 20260723, 20260724]
+
+residual:
+  tolerances: [0.0, 0.01, 0.05]
+  norm_models: [frobenius, spectral]
+
+staging:
+  j2_values: [2, 3, 4]
+  forbid_j2_1: true
+
+priority_policy:
+  name: expected_q_gain_per_second_v1
+
+layers:
+  perron_weight_strategy: [all_ones, interval_power, inverse_row_sum]
+  coupling_policy: [uniform_full]

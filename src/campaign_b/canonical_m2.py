@@ -216,3 +216,157 @@ def ensure_canonical_shared_m2(
         f'staged M2 {run_id} not complete after {max_sessions} sessions; '
         f'last={last_summary}'
     )
+
+
+def start_canonical_m2_background_worker(
+    *,
+    persistent_root: Path,
+    project_root: Path,
+    j2_max: int = 2,
+    owner_id: str = 'campaign_b_auto',
+) -> dict[str, Any]:
+    """Detached worker (Paperspace-safe): do not run SymPy inside Jupyter."""
+    import os
+    import subprocess
+    import sys
+
+    persistent_root = Path(persistent_root).resolve()
+    project_root = Path(project_root).resolve()
+    work = persistent_root / 'campaign_b' / '_auto_m2'
+    work.mkdir(parents=True, exist_ok=True)
+    pid_path = work / 'worker.pid'
+    log_path = work / 'worker.log'
+    status_path = work / 'worker_status.json'
+
+    if pid_path.is_file():
+        try:
+            pid = int(pid_path.read_text(encoding='utf-8').strip())
+            os.kill(pid, 0)
+            return {
+                'started': False,
+                'reason': 'already_running',
+                'pid': pid,
+                'status_path': str(status_path),
+                'log_path': str(log_path),
+                **screening_only_payload(),
+            }
+        except (ValueError, ProcessLookupError, PermissionError, OSError):
+            pass
+
+    worker_py = work / 'run_worker.py'
+    worker_py.write_text(
+        f'''#!/usr/bin/env python3
+from __future__ import annotations
+import json, os, sys, traceback
+from pathlib import Path
+PROJECT = Path({str(project_root)!r})
+PERSIST = Path({str(persistent_root)!r})
+STATUS = Path({str(status_path)!r})
+sys.path.insert(0, str(PROJECT))
+os.environ['VALIDATED_RG_PROJECT_ROOT'] = str(PROJECT)
+os.environ['VALIDATED_RG_PERSIST_ROOT'] = str(PERSIST)
+os.environ.setdefault('VALIDATED_RG_M2_SPLIT_BATCH_TO', '1')
+os.environ.setdefault('VALIDATED_RG_CHECKPOINT_KEEP', '5')
+os.environ.setdefault('VALIDATED_RG_M2_ALLOW_CODE_DRIFT', '1')
+
+def write_status(payload):
+    STATUS.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str), encoding='utf-8')
+
+write_status({{'state': 'starting', 'pid': os.getpid()}})
+try:
+    from src.campaign_b.canonical_m2 import ensure_canonical_shared_m2
+    from src.common import utc_now
+    binding = ensure_canonical_shared_m2(
+        persistent_root=PERSIST,
+        project_root=PROJECT,
+        j2_max={int(j2_max)},
+        owner_id={owner_id!r},
+    )
+    write_status({{
+        'state': 'finished',
+        'pid': os.getpid(),
+        'finished_at': utc_now(),
+        'binding': binding,
+    }})
+except Exception as exc:
+    write_status({{
+        'state': 'failed',
+        'pid': os.getpid(),
+        'error': f'{{type(exc).__name__}}: {{exc}}',
+        'traceback': traceback.format_exc(),
+    }})
+    raise
+''',
+        encoding='utf-8',
+    )
+    log_handle = log_path.open('a', encoding='utf-8')
+    log_handle.write(f'\n===== canonical shared M2 worker start {utc_now()} =====\n')
+    log_handle.flush()
+    proc = subprocess.Popen(
+        [sys.executable, '-u', str(worker_py)],
+        cwd=str(project_root),
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        env={
+            **os.environ,
+            'PYTHONPATH': str(project_root),
+            'VALIDATED_RG_PROJECT_ROOT': str(project_root),
+            'VALIDATED_RG_PERSIST_ROOT': str(persistent_root),
+            'VALIDATED_RG_M2_SPLIT_BATCH_TO': '1',
+            'VALIDATED_RG_CHECKPOINT_KEEP': '5',
+            'VALIDATED_RG_M2_ALLOW_CODE_DRIFT': '1',
+        },
+    )
+    pid_path.write_text(str(proc.pid), encoding='utf-8')
+    atomic_write_json(status_path, {
+        'state': 'spawned',
+        'pid': proc.pid,
+        'at': utc_now(),
+        **screening_only_payload(),
+    })
+    return {
+        'started': True,
+        'pid': proc.pid,
+        'status_path': str(status_path),
+        'log_path': str(log_path),
+        'progress_path': str(work / 'session_progress.json'),
+        **screening_only_payload(),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import json
+    import os
+    import sys
+
+    parser = argparse.ArgumentParser(description='Prepare canonical shared M2 (84/73 staged)')
+    parser.add_argument('--persistent-root', default=os.environ.get(
+        'VALIDATED_RG_PERSIST_ROOT', '/storage/validated_4d_su2_rg',
+    ))
+    parser.add_argument('--project-root', default=os.environ.get(
+        'VALIDATED_RG_PROJECT_ROOT', str(Path(__file__).resolve().parents[2]),
+    ))
+    parser.add_argument('--j2-max', type=int, default=2)
+    parser.add_argument('--background', action='store_true')
+    args = parser.parse_args(argv)
+
+    if args.background:
+        result = start_canonical_m2_background_worker(
+            persistent_root=Path(args.persistent_root),
+            project_root=Path(args.project_root),
+            j2_max=args.j2_max,
+        )
+    else:
+        result = ensure_canonical_shared_m2(
+            persistent_root=Path(args.persistent_root),
+            project_root=Path(args.project_root),
+            j2_max=args.j2_max,
+        )
+    print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

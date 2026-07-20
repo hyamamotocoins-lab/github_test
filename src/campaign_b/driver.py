@@ -369,8 +369,12 @@ def run_campaign_b(config_path: Path | str) -> dict[str, Any]:
                     c for c in (queue.get('candidates') or [])
                     if c.get('state') == 'PENDING' and c['candidate_id'] not in archived_ids
                 ]
+                selected_so_far = list((store.load_ledger().get('selected') or []))
                 if pending and budget.enforce_wall_clock and budget.admission_closed():
                     terminal_reason = TERMINAL_TIME
+                elif selected_so_far:
+                    # Queue done, but verified screening hits exist.
+                    terminal_reason = TERMINAL_Q_LT_1
                 else:
                     terminal_reason = TERMINAL_EXHAUSTED
                 break

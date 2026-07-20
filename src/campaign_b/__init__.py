@@ -1,4 +1,4 @@
-"""Campaign B (S2) six-hour autonomous exploration package."""
+"""Campaign B (S2) autonomous exploration package."""
 
 from .errors import (
     CampaignFatalError,
@@ -15,6 +15,7 @@ __all__ = [
     'TimeBudgetClosed',
     'load_campaign_b_config',
     'run_campaign_b',
+    'run_mass_explore',
 ]
 
 
@@ -28,4 +29,7 @@ def __getattr__(name: str):
     if name == 'run_campaign_b':
         from .driver import run_campaign_b
         return run_campaign_b
+    if name == 'run_mass_explore':
+        from .mass_explore import run_mass_explore
+        return run_mass_explore
     raise AttributeError(name)

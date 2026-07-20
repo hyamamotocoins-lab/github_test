@@ -101,10 +101,13 @@ def generate_campaign_b_queue_candidates(
     parent_m6_run_id: str,
     parent_scheme_hash: str,
     limit: int | None = None,
+    exclude_normalized_keys: set[str] | frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Enumerate only values present in the versioned search space."""
     if search_space.get('campaign') not in {'B_S2', 'B'}:
         raise InvariantViolation('refusing non-B search space')
+
+    excluded = set(exclude_normalized_keys or ())
 
     rank_values = list(
         (search_space.get('rank') or {}).get('values')
@@ -183,7 +186,11 @@ def generate_campaign_b_queue_candidates(
                                             'scheme': scheme,
                                         }))
                                         norm_key = normalized_scheme_key(scheme)
-                                        if exact_key in seen_exact or norm_key in seen_normalized:
+                                        if (
+                                            exact_key in seen_exact
+                                            or norm_key in seen_normalized
+                                            or norm_key in excluded
+                                        ):
                                             continue
                                         seen_exact.add(exact_key)
                                         seen_normalized.add(norm_key)
