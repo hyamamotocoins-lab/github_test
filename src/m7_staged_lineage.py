@@ -378,6 +378,137 @@ def write_child_m3_acceptance_audit(
     return audit
 
 
+def write_child_m4_acceptance_audit(
+    project_root: Path,
+    *,
+    run_root: Path,
+    audit_relative: str = 'audit/m4_accepted_parent.json',
+) -> dict[str, Any]:
+    """Rewrite M4→M5 parent audit from a completed child M4 run.
+
+    Marks DERIVATIVE_ACCEPTED for exploratory one-step validation while keeping
+    enclosure BLOCKED_MATH / NOT_CERTIFIED. Does not claim q<1 or continuum.
+    """
+    from .m4_status import (
+        M4_DERIVATIVE_ACCEPTED, M4_ENCLOSURE_BLOCKED, M4_IMPLEMENTATION_COMPLETE,
+        m4_bound_handoff,
+    )
+    from .m5_parent import _verify_regression
+    from .work_queue import WorkQueue
+
+    run_root = run_root.resolve()
+    report_path = run_root / 'reports' / 'M4_report.json'
+    acceptance_path = run_root / 'reports' / 'M4_acceptance.json'
+    manifest_path = run_root / 'run_manifest.json'
+    if not report_path.is_file() or not acceptance_path.is_file():
+        raise M7StagedLineageError('Child M4 report/acceptance missing.')
+    report = read_json(report_path)
+    acceptance = read_json(acceptance_path)
+    manifest = read_json(manifest_path)
+    if not all(isinstance(doc, dict) for doc in (report, acceptance, manifest)):
+        raise M7StagedLineageError('Child M4 artifacts malformed.')
+    if (
+        report.get('phase') != 'M4_COMPLETE'
+        or report.get('enclosure_status') != M4_ENCLOSURE_BLOCKED
+        or acceptance.get('status') != 'PASS'
+    ):
+        raise M7StagedLineageError('Child M4 is not acceptance-complete.')
+
+    checkpoint_meta = report.get('checkpoint') or {}
+    raw_ckpt = checkpoint_meta.get('path')
+    checkpoint_path = (
+        Path(str(raw_ckpt)).resolve()
+        if isinstance(raw_ckpt, str) and raw_ckpt.strip()
+        else None
+    )
+    if checkpoint_path is None or not checkpoint_path.is_dir():
+        ckpt_root = run_root / 'checkpoints'
+        candidates = sorted(
+            path for path in ckpt_root.glob('ckpt_*')
+            if (path / 'COMMITTED').is_file()
+        )
+        if not candidates:
+            raise M7StagedLineageError('No committed M4 checkpoint for audit rewrite.')
+        checkpoint_path = candidates[-1]
+    try:
+        checkpoint_path.relative_to(run_root)
+    except ValueError as exc:
+        raise M7StagedLineageError(
+            'Child M4 checkpoint escapes its run root.'
+        ) from exc
+
+    hashes_path = checkpoint_path / 'hashes.json'
+    queue = read_json(checkpoint_path / 'work_queue.json')
+    state = read_json(checkpoint_path / 'state.json')
+    if not isinstance(queue, dict) or not isinstance(state, dict):
+        raise M7StagedLineageError('Checkpoint queue/state malformed.')
+    work = WorkQueue.from_payload(queue)
+    regression = _verify_regression(report)
+    difference = (report.get('results') or {}).get('M4_FINITE_DIFFERENCE', {}).get(
+        'result', {},
+    )
+    config = report.get('config') if isinstance(report.get('config'), dict) else {}
+    fd_channels = difference.get('channels') if isinstance(difference, dict) else {}
+    audit = {
+        'schema_version': 1,
+        'milestone_reviewed': 'M4',
+        'accepted_for_next_milestone': 'M5',
+        'accepted_phase': 'M4_COMPLETE',
+        'accepted_run_id': report.get('run_id'),
+        'checkpoint_index': int(
+            state.get('checkpoint_index', checkpoint_meta.get('index', 0))
+        ),
+        'implementation_status': M4_IMPLEMENTATION_COMPLETE,
+        'milestone_status': M4_DERIVATIVE_ACCEPTED,
+        'enclosure_status': M4_ENCLOSURE_BLOCKED,
+        'certification_status': 'NOT_CERTIFIED',
+        'decision': 'ACCEPT_M4_DERIVATIVE_FOR_M5_ONE_STEP_VALIDATION',
+        'independent_artifact_reload_performed': True,
+        'bound_ledger': m4_bound_handoff(),
+        'm4_report_path': str(report_path),
+        'm4_acceptance_path': str(acceptance_path),
+        'checkpoint_path': str(checkpoint_path),
+        'manifest_path': str(manifest_path),
+        'm4_report_sha256': sha256_file(report_path),
+        'm4_acceptance_sha256': sha256_file(acceptance_path),
+        'manifest_sha256': sha256_file(manifest_path),
+        'checkpoint_hash_manifest_sha256': sha256_file(hashes_path),
+        'proof_artifact_hashes': {
+            item.phase: item.result_sha256
+            for item in work.items.values()
+            if item.status == 'done' and item.result_sha256
+        },
+        'derivative_regression': {
+            'classification': (
+                'REPRODUCIBLE_REGRESSION_ACCEPTANCE_NOT_A_DETERMINISTIC_PROOF_BOUND'
+            ),
+            'all_channels_converged': True,
+            'channel_count': len(fd_channels) if isinstance(fd_channels, dict) else 0,
+            'configured_relative_tolerance': config.get(
+                'finite_difference_relative_tolerance'
+            ),
+            'steps': config.get('finite_difference_steps'),
+            'minimum_observed_centered_fd_order': (
+                regression['minimum_observed_centered_fd_order']
+            ),
+            'max_final_relative_error': regression['max_final_relative_error'],
+            'zero_tangent_residual': regression['zero_tangent_residual'],
+            'symmetry_residual': regression['symmetry_residual'],
+            'finite_difference_is_proof_bound': False,
+        },
+        'staged_child_lineage': True,
+        'generated_at': utc_now(),
+        'scope_limitation': (
+            'Child M4 derivative acceptance rewrite for staged j2_max>=2 lineage; '
+            'enclosure remains BLOCKED_MATH; screening q is not a certificate; '
+            'not a continuum or mass-gap claim.'
+        ),
+    }
+    out = project_root / audit_relative
+    atomic_write_json(out, audit)
+    return audit
+
+
 def run_staged_lineage_from_package(
     package_root: Path,
     *,

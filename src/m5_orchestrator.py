@@ -66,6 +66,8 @@ def build_parent_artifact_inventory(
     persistent_root: Path,
     parent_run_id: str,
     parent_hashes: dict[str, str],
+    *,
+    checkpoint_relative: str,
 ) -> dict[str, Any]:
     run_root = persistent_root / 'runs' / parent_run_id
     records: list[dict[str, Any]] = []
@@ -73,7 +75,7 @@ def build_parent_artifact_inventory(
         ('reports/M4_report.json', 'M4', 'parent_report'),
         ('reports/M4_acceptance.json', 'M4', 'parent_acceptance'),
         ('run_manifest.json', 'M4', 'parent_manifest'),
-        ('checkpoints/ckpt_000014/hashes.json', 'M4', 'parent_checkpoint_hashes'),
+        (f'{checkpoint_relative}/hashes.json', 'M4', 'parent_checkpoint_hashes'),
     ]
     for relative, milestone, role in candidates:
         path = run_root / relative
@@ -110,6 +112,7 @@ def build_parent_artifact_inventory(
         'schema_version': 1,
         'parent_run_id': parent_run_id,
         'parent_hashes': parent_hashes,
+        'checkpoint_relative': checkpoint_relative,
         'artifacts': records,
         'generated_at': utc_now(),
     }
@@ -299,11 +302,30 @@ class M5Orchestrator:
                     else NOT_CERTIFIED
                 )
             else:
+                from .common import read_json
+                audit = read_json(
+                    self.project_root / 'audit' / 'm4_accepted_parent.json'
+                )
+                if not isinstance(audit, dict):
+                    raise M5OrchestratorError('M4 acceptance audit is malformed.')
+                checkpoint_path = Path(str(audit.get('checkpoint_path', '')))
+                if not checkpoint_path.is_dir():
+                    raise M5OrchestratorError('M4 audit checkpoint_path is missing.')
+                try:
+                    checkpoint_relative = checkpoint_path.resolve().relative_to(
+                        (self.persistent_root / 'runs' / self.config.parent_m4_run_id)
+                        .resolve()
+                    ).as_posix()
+                except ValueError as exc:
+                    raise M5OrchestratorError(
+                        'M4 audit checkpoint escapes parent run root.'
+                    ) from exc
                 inventory = build_parent_artifact_inventory(
                     self.project_root,
                     self.persistent_root,
                     self.config.parent_m4_run_id,
                     parent_info['hashes'],
+                    checkpoint_relative=checkpoint_relative,
                 )
                 mapping = build_schema_mapping()
                 reports = self.run_root / 'reports'
@@ -311,10 +333,7 @@ class M5Orchestrator:
                 atomic_write_json(reports / 'M5_parent_artifact_inventory.json', inventory)
                 atomic_write_json(reports / 'M5_schema_mapping.json', mapping)
 
-                m4_checkpoint = (
-                    self.persistent_root / 'runs' / self.config.parent_m4_run_id
-                    / 'checkpoints' / 'ckpt_000014'
-                )
+                m4_checkpoint = checkpoint_path.resolve()
                 obligation_report = evaluate_all_obligations(
                     self.project_root,
                     self.persistent_root,

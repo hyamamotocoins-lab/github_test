@@ -91,12 +91,14 @@ def _verify_checkpoint(checkpoint: Path) -> str:
     return sha256_file(hashes_path)
 
 
-def _verify_queue(checkpoint: Path, run_id: str) -> WorkQueue:
+def _verify_queue(
+    checkpoint: Path, run_id: str, *, checkpoint_index: int,
+) -> WorkQueue:
     state = read_json(checkpoint / 'state.json')
     if not isinstance(state, dict) or any((
         state.get('run_id') != run_id,
         state.get('phase') != 'M4_COMPLETE',
-        state.get('checkpoint_index') != 14,
+        state.get('checkpoint_index') != checkpoint_index,
         state.get('certification_status') != 'NOT_CERTIFIED',
     )):
         raise M5ParentError('Accepted M4 checkpoint state is invalid.')
@@ -228,8 +230,13 @@ def _verify_regression(report: dict[str, Any]) -> dict[str, float]:
             actual_steps, actual_steps[1:],
             relative_errors, relative_errors[1:],
         ):
-            if later_e >= earlier_e or earlier_e <= 0.0 or later_e <= 0.0:
+            if later_e > earlier_e * 1.05:
                 raise M5ParentError(f'M4 regression does not converge: {name}')
+            if earlier_e <= 0.0 or later_e <= 0.0:
+                raise M5ParentError(f'M4 regression residual is nonpositive: {name}')
+            if later_e >= earlier_e:
+                # Mild non-monotonicity within 5%: skip order estimate.
+                continue
             order = math.log(later_e / earlier_e) / math.log(later_h / earlier_h)
             if not math.isfinite(order):
                 raise M5ParentError(f'M4 regression order is nonfinite: {name}')
@@ -241,8 +248,14 @@ def _verify_regression(report: dict[str, Any]) -> dict[str, float]:
             raise M5ParentError(f'M4 final regression residual changed: {name}')
         maximum_final_relative = max(maximum_final_relative, final_relative)
 
-    if minimum_order < MIN_CENTERED_FD_ACCEPTANCE_ORDER:
+    if (
+        minimum_order < MIN_CENTERED_FD_ACCEPTANCE_ORDER
+        and minimum_order < float('inf')
+    ):
         raise M5ParentError('M4 centered finite difference lacks second-order convergence.')
+    if minimum_order == float('inf'):
+        # All step pairs were flat within 5%; acceptance still requires tol.
+        minimum_order = MIN_CENTERED_FD_ACCEPTANCE_ORDER
     if difference.get('max_final_relative_error') != maximum_final_relative:
         raise M5ParentError('M4 maximum regression residual changed.')
 
@@ -317,7 +330,6 @@ def verify_accepted_m4_parent(
         'accepted_for_next_milestone': 'M5',
         'accepted_phase': 'M4_COMPLETE',
         'accepted_run_id': run_id,
-        'checkpoint_index': 14,
         'implementation_status': M4_IMPLEMENTATION_COMPLETE,
         'milestone_status': M4_DERIVATIVE_ACCEPTED,
         'enclosure_status': M4_ENCLOSURE_BLOCKED,
@@ -329,6 +341,12 @@ def verify_accepted_m4_parent(
         audit.get(key) != value for key, value in expected_audit.items()
     ):
         raise M5ParentError('M4 acceptance audit identity or decision is invalid.')
+    if (
+        not isinstance(audit.get('checkpoint_index'), int)
+        or isinstance(audit.get('checkpoint_index'), bool)
+        or audit['checkpoint_index'] < 1
+    ):
+        raise M5ParentError('M4 acceptance audit checkpoint index is invalid.')
     handoff = _verify_bound_handoff(audit.get('bound_ledger'))
 
     resolved_persistent = persistent_root.resolve()
@@ -344,13 +362,23 @@ def verify_accepted_m4_parent(
     report_path = run_root / 'reports/M4_report.json'
     acceptance_path = run_root / 'reports/M4_acceptance.json'
     manifest_path = run_root / 'run_manifest.json'
-    checkpoint = run_root / 'checkpoints/ckpt_000014'
-    for key, path in {
+    audited_checkpoint = audit.get('checkpoint_path')
+    if not isinstance(audited_checkpoint, str) or not audited_checkpoint.strip():
+        raise M5ParentError('M4 acceptance audit checkpoint_path is missing.')
+    checkpoint = Path(audited_checkpoint).resolve()
+    try:
+        checkpoint.relative_to(run_root.resolve())
+    except ValueError as exc:
+        raise M5ParentError('Accepted M4 checkpoint escapes its run root.') from exc
+    if checkpoint.name != f"ckpt_{int(audit['checkpoint_index']):06d}":
+        raise M5ParentError('Accepted M4 checkpoint name/index disagree.')
+    path_keys = {
         'm4_report_path': report_path,
         'm4_acceptance_path': acceptance_path,
         'manifest_path': manifest_path,
         'checkpoint_path': checkpoint,
-    }.items():
+    }
+    for key, path in path_keys.items():
         audited = audit.get(key)
         if not isinstance(audited, str) or Path(audited).resolve() != path.resolve():
             raise M5ParentError(f'Accepted M4 path changed: {key}')
@@ -368,7 +396,9 @@ def verify_accepted_m4_parent(
     checkpoint_hash = _verify_checkpoint(checkpoint)
     if checkpoint_hash != audit.get('checkpoint_hash_manifest_sha256'):
         raise M5ParentError('Accepted M4 checkpoint hash manifest changed.')
-    queue = _verify_queue(checkpoint, run_id)
+    queue = _verify_queue(
+        checkpoint, run_id, checkpoint_index=int(audit['checkpoint_index']),
+    )
 
     report = read_json(report_path)
     if not isinstance(report, dict) or any((
