@@ -28,6 +28,85 @@ def default_sector_batch_size(j2_max: int, gate: dict[str, Any] | None = None) -
     return 0 if j2_max <= 1 else 16
 
 
+def inspect_staged_m2_progress(
+    persistent_root: Path,
+    *,
+    run_id: str,
+) -> dict[str, Any]:
+    """Read-only progress for a staged child M2 run (safe across sessions)."""
+    run_root = Path(persistent_root) / 'runs' / run_id
+    if not run_root.is_dir():
+        return {
+            'run_id': run_id,
+            'exists': False,
+            'note': 'Run directory not found yet; first session creates it.',
+        }
+    config_path = run_root / 'run_config.json'
+    config_payload = read_json(config_path) if config_path.is_file() else None
+    ckpt_root = run_root / 'checkpoints'
+    committed = sorted(
+        path for path in ckpt_root.glob('ckpt_*')
+        if (path / 'COMMITTED').is_file()
+    )
+    if not committed:
+        return {
+            'run_id': run_id,
+            'exists': True,
+            'committed_checkpoints': 0,
+            'j2_max': (
+                config_payload.get('j2_max')
+                if isinstance(config_payload, dict) else None
+            ),
+            'note': 'No committed checkpoint yet.',
+        }
+    latest = committed[-1]
+    state = read_json(latest / 'state.json')
+    queue_payload = read_json(latest / 'work_queue.json')
+    counts = {
+        'pending': 0, 'running': 0, 'done': 0, 'failed': 0, 'blocked_resource': 0,
+    }
+    phase_pending: dict[str, int] = {}
+    if isinstance(queue_payload, dict):
+        items = queue_payload.get('items') or {}
+        if isinstance(items, dict):
+            for item in items.values():
+                if not isinstance(item, dict):
+                    continue
+                status = str(item.get('status') or 'pending')
+                counts[status] = counts.get(status, 0) + 1
+                if status == 'pending':
+                    phase = str(item.get('phase') or '?')
+                    phase_pending[phase] = phase_pending.get(phase, 0) + 1
+    acceptance = run_root / 'reports' / 'M2_acceptance.json'
+    done = counts.get('done', 0)
+    total = sum(counts.values())
+    return {
+        'run_id': run_id,
+        'exists': True,
+        'run_root': str(run_root),
+        'latest_checkpoint': str(latest),
+        'checkpoint_index': (
+            state.get('checkpoint_index') if isinstance(state, dict) else None
+        ),
+        'phase': state.get('phase') if isinstance(state, dict) else None,
+        'certification_status': (
+            state.get('certification_status') if isinstance(state, dict) else None
+        ),
+        'queue_counts': counts,
+        'pending_by_phase': phase_pending,
+        'fraction_done': (done / total) if total else 0.0,
+        'm2_complete': acceptance.is_file(),
+        'j2_max': (
+            config_payload.get('j2_max') if isinstance(config_payload, dict) else None
+        ),
+        'sector_batch_size': (
+            config_payload.get('sector_batch_size')
+            if isinstance(config_payload, dict) else None
+        ),
+        'total_items': total,
+    }
+
+
 def run_staged_m2_session(
     *,
     persistent_root: Path,
@@ -78,6 +157,9 @@ def run_staged_m2_session(
         and (orch.run_root / 'reports' / 'M2_acceptance.json').is_file()
     )
     summary['run_root'] = str(orch.run_root)
+    summary['progress'] = inspect_staged_m2_progress(
+        persistent_root, run_id=orch.state.run_id,
+    )
     return summary
 
 
@@ -164,6 +246,7 @@ def run_staged_lineage_from_package(
     project_root: Path,
     rewrite_m2_audit: bool = True,
     sector_batch_size: int | None = None,
+    test_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Drive one staged live session from a Campaign C package."""
     root = package_root.resolve()
@@ -190,6 +273,7 @@ def run_staged_lineage_from_package(
         j2_max=j2_max,
         run_id=m2_id,
         sector_batch_size=sector_batch_size,
+        test_report=test_report,
     )
     audit = None
     if summary.get('m2_complete') and rewrite_m2_audit:

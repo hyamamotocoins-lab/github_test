@@ -12,6 +12,8 @@
 6. `notebooks/50_m4_derivatives.ipynb`
 7. `notebooks/60_m5_one_step_certificate.ipynb`
 8. `notebooks/70_m6_multistep_certificate.ipynb`
+9. `notebooks/72_m7_certified_scheme_search.ipynb`
+10. `notebooks/73_m7_staged_s3_lineage.ipynb`（j2=2 staged M2 / セッション跨ぎ resume）
 
 最初の setup notebook と各段階 notebook は、必要な依存を確認してから実行します。M1/M2 の
 証明経路は CPU exact arithmetic、M3 の探索経路は CUDA FP64 を使います。M3 は
@@ -116,9 +118,10 @@ oversampling / power_iterations）で M3→M6 lineage plan を LOCK 下に発行
 Campaign C は S3（`j2_max` / channel_policy / block_geometry）で M2→M6 lineage
 plan を発行する。`lineage_mode=auto` なら最良候補の選定・レビュー承認・
 パッケージ生成・config dry-run まで自動化する（`src/m7_auto_execute.py`）。
-j2_max∈[1,4] の次元は導出可能だが、live exact-M2 の自動実行は資源ゲートで
-j2_max=1 に制限（j2≥2 は MATERIALIZED_RESOURCE_GATED）。`fixture_residual`
-は CPU コントローラ試験専用。
+j2_max∈[1,4] の次元は導出可能。j2=1 は instant live、j2=2 は staged
+sector-batched M2（`READY_FOR_STAGED_LIVE_EXECUTE` /
+`notebooks/73_m7_staged_s3_lineage.ipynb` でセッション跨ぎ resume）。
+j2>max_staged は archive のみ。`fixture_residual` は CPU コントローラ試験専用。
 
 現行 paperspace 設計は親 M5 one-step majorant を最終値として継承するため、親と同じ
 `q_cert` になり得ます。Campaign B で residual が小さく core 支配なら Campaign C

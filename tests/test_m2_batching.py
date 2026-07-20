@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.cutoff_dims import expected_m2_gate_counts, odd_sum_sector_count
 from src.m2_batching import m2_batch_plan, merge_m2_batch_payloads, predicted_batch_s
 from src.m2_config import M2Config
+from src.m7_staged_lineage import inspect_staged_m2_progress
+
+
+def test_inspect_staged_m2_missing_run(tmp_path: Path) -> None:
+    info = inspect_staged_m2_progress(tmp_path, run_id='M2-missing')
+    assert info['exists'] is False
+    assert info['run_id'] == 'M2-missing'
 
 
 def test_odd_sum_and_expected_gates_j2_1() -> None:
