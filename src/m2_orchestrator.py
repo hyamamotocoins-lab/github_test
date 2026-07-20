@@ -191,19 +191,19 @@ class M2Orchestrator:
         zero_count = 0
         residual_count = 0
         for index, key in enumerate(keys):
-            dim = representation_dimension(key.reps)
+            dim = representation_dimension(key.representations)
             print(
                 f'M2 dense sector {index + 1}/{len(keys)} '
-                f'reps={list(key.reps)} dim={dim}',
+                f'reps={list(key.representations)} dim={dim}',
                 flush=True,
             )
-            dense = build_dense_reference(key.reps, key.orientations)
+            dense = build_dense_reference(key.representations, key.orientations)
             residual_count += int(dense.generator_residual_zero)
             is_zero = not any(dense.projector)
-            if sum(key.reps) % 2 and is_zero:
+            if sum(key.representations) % 2 and is_zero:
                 zero_count += 1
             sectors.append({
-                'reps': list(key.reps),
+                'reps': list(key.representations),
                 'orientations': list(key.orientations),
                 'dense_dimension': dim,
                 'singlet_rank': dense.singlet_rank,
@@ -211,7 +211,7 @@ class M2Orchestrator:
                 'generator_residual_zero': dense.generator_residual_zero,
             })
             print(
-                f'M2 dense sector done reps={list(key.reps)} '
+                f'M2 dense sector done reps={list(key.representations)} '
                 f'rank={dense.singlet_rank} residual_zero={dense.generator_residual_zero}',
                 flush=True,
             )
