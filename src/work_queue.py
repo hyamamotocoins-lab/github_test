@@ -131,7 +131,38 @@ class WorkQueue:
             if not valid:
                 item.result_relpath = None
                 item.result_sha256 = None
+                # Process death leaves status=running after attempts was already
+                # incremented; do not spend the attempt budget on infrastructure kills.
+                if previous_status == 'running' and item.attempts > 0:
+                    item.attempts -= 1
             if previous_status == 'running' or item.status != previous_status:
+                repaired.append(item.item_id)
+        return repaired
+
+    def reset_transient_attempt_budget(
+        self,
+        *,
+        max_item_attempts: int,
+        reasons: tuple[str, ...] = (
+            'Maximum M2 attempt count exceeded.',
+            'KeyboardInterrupt',
+        ),
+    ) -> list[str]:
+        """Re-open items exhausted only by interrupts / session kills."""
+        repaired: list[str] = []
+        for item in self.items.values():
+            error = item.last_error or ''
+            transient = any(reason in error for reason in reasons)
+            over_budget = item.attempts >= max_item_attempts
+            if item.status == 'failed' and (transient or over_budget):
+                item.status = 'pending'
+                item.attempts = 0
+                item.last_error = None
+                repaired.append(item.item_id)
+            elif item.status == 'pending' and over_budget:
+                item.attempts = 0
+                if transient:
+                    item.last_error = None
                 repaired.append(item.item_id)
         return repaired
 

@@ -637,6 +637,12 @@ def create_or_resume_m2(
                 'Existing M2 run has no valid checkpoint.',
             )
         repaired = loaded.queue.recover_interrupted(run_root)
+        if allow_code_drift:
+            repaired.extend(
+                loaded.queue.reset_transient_attempt_budget(
+                    max_item_attempts=config.max_item_attempts,
+                )
+            )
         orchestrator = M2Orchestrator(
             persistent_root, run_root, project_root, config,
             loaded.state, loaded.queue, manager, effective_test_report,
@@ -644,7 +650,7 @@ def create_or_resume_m2(
         )
         if repaired:
             orchestrator.checkpoint(
-                f'recovered {len(repaired)} interrupted M2 item(s)',
+                f'recovered {len(repaired)} interrupted/transient M2 item(s)',
             )
         print('Resumed M2 from:', loaded.path)
         return orchestrator

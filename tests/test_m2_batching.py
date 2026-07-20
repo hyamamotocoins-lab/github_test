@@ -8,7 +8,36 @@ from src.m2_config import M2Config
 from src.m7_staged_lineage import inspect_staged_m2_progress
 
 
-def test_inspect_staged_m2_missing_run(tmp_path: Path) -> None:
+def test_reset_transient_attempt_budget() -> None:
+    from src.work_queue import WorkQueue
+
+    queue = WorkQueue()
+    item_id = queue.add('M2_DENSE_REFERENCE', 'a' * 64, {'batch': 0}, 1.0)
+    item = queue.items[item_id]
+    item.status = 'failed'
+    item.attempts = 4
+    item.last_error = 'Maximum M2 attempt count exceeded.'
+    repaired = queue.reset_transient_attempt_budget(max_item_attempts=3)
+    assert item_id in repaired
+    assert item.status == 'pending'
+    assert item.attempts == 0
+    assert item.last_error is None
+
+
+def test_recover_interrupted_refunds_attempt(tmp_path: Path) -> None:
+    from src.work_queue import WorkQueue
+
+    queue = WorkQueue()
+    item_id = queue.add('M2_DENSE_REFERENCE', 'a' * 64, {'batch': 1}, 1.0)
+    item = queue.items[item_id]
+    item.status = 'running'
+    item.attempts = 2
+    (tmp_path / 'work_items').mkdir(parents=True)
+    repaired = queue.recover_interrupted(tmp_path)
+    assert item_id in repaired
+    assert item.status == 'pending'
+    assert item.attempts == 1
+
     info = inspect_staged_m2_progress(tmp_path, run_id='M2-missing')
     assert info['exists'] is False
     assert info['run_id'] == 'M2-missing'
