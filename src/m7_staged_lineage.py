@@ -281,6 +281,103 @@ def write_child_m2_acceptance_audit(
     return audit
 
 
+def write_child_m3_acceptance_audit(
+    project_root: Path,
+    *,
+    run_root: Path,
+    audit_relative: str = 'audit/m3_accepted_parent.json',
+) -> dict[str, Any]:
+    """Rewrite M3→M4 parent audit from a completed child M3 run.
+
+    Does not claim continuum results. Operator must still independently review
+    before treating the child lineage as production-accepted.
+    """
+    run_root = run_root.resolve()
+    report_path = run_root / 'reports' / 'M3_report.json'
+    acceptance_path = run_root / 'reports' / 'M3_acceptance.json'
+    manifest_path = run_root / 'run_manifest.json'
+    if not report_path.is_file() or not acceptance_path.is_file():
+        raise M7StagedLineageError('Child M3 report/acceptance missing.')
+    report = read_json(report_path)
+    acceptance = read_json(acceptance_path)
+    manifest = read_json(manifest_path)
+    if not all(isinstance(doc, dict) for doc in (report, acceptance, manifest)):
+        raise M7StagedLineageError('Child M3 artifacts malformed.')
+    if (
+        report.get('phase') != 'M3_COMPLETE'
+        or report.get('milestone_status') != 'CORE_REPRODUCED'
+        or acceptance.get('status') != 'PASS'
+    ):
+        raise M7StagedLineageError('Child M3 is not acceptance-complete.')
+
+    checkpoint_meta = report.get('checkpoint') or {}
+    raw_ckpt = checkpoint_meta.get('path')
+    checkpoint_path = (
+        Path(str(raw_ckpt)).resolve()
+        if isinstance(raw_ckpt, str) and raw_ckpt.strip()
+        else None
+    )
+    if checkpoint_path is None or not checkpoint_path.is_dir():
+        ckpt_root = run_root / 'checkpoints'
+        candidates = sorted(
+            path for path in ckpt_root.glob('ckpt_*')
+            if (path / 'COMMITTED').is_file()
+        )
+        if not candidates:
+            raise M7StagedLineageError('No committed M3 checkpoint for audit rewrite.')
+        checkpoint_path = candidates[-1]
+    try:
+        checkpoint_path.relative_to(run_root)
+    except ValueError as exc:
+        raise M7StagedLineageError(
+            'Child M3 checkpoint escapes its run root.'
+        ) from exc
+
+    hashes_path = checkpoint_path / 'hashes.json'
+    queue = read_json(checkpoint_path / 'work_queue.json')
+    state = read_json(checkpoint_path / 'state.json')
+    if not isinstance(queue, dict) or not isinstance(state, dict):
+        raise M7StagedLineageError('Checkpoint queue/state malformed.')
+
+    from .work_queue import WorkQueue
+    work = WorkQueue.from_payload(queue)
+    audit = {
+        'schema_version': 1,
+        'milestone_reviewed': 'M3',
+        'accepted_for_next_milestone': 'M4',
+        'accepted_phase': 'M3_COMPLETE',
+        'accepted_run_id': report.get('run_id'),
+        'checkpoint_index': int(
+            state.get('checkpoint_index', checkpoint_meta.get('index', 0))
+        ),
+        'decision': 'ACCEPT_M3_FOR_M4_FORWARD_DERIVATIVE_IMPLEMENTATION',
+        'certification_status': 'NOT_CERTIFIED',
+        'independent_artifact_reload_performed': True,
+        'm3_report_path': str(report_path),
+        'm3_acceptance_path': str(acceptance_path),
+        'checkpoint_path': str(checkpoint_path),
+        'manifest_path': str(manifest_path),
+        'm3_report_sha256': sha256_file(report_path),
+        'm3_acceptance_sha256': sha256_file(acceptance_path),
+        'manifest_sha256': sha256_file(manifest_path),
+        'checkpoint_hash_manifest_sha256': sha256_file(hashes_path),
+        'proof_artifact_hashes': {
+            item.phase: item.result_sha256
+            for item in work.items.values()
+            if item.status == 'done' and item.result_sha256
+        },
+        'staged_child_lineage': True,
+        'generated_at': utc_now(),
+        'scope_limitation': (
+            'Child M3 acceptance rewrite for staged j2_max>=2 lineage only; '
+            'exploratory CORE_REPRODUCED pilot; not a continuum or mass-gap claim.'
+        ),
+    }
+    out = project_root / audit_relative
+    atomic_write_json(out, audit)
+    return audit
+
+
 def run_staged_lineage_from_package(
     package_root: Path,
     *,

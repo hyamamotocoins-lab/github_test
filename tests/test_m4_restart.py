@@ -10,6 +10,7 @@ import pytest
 
 from src.checkpoint import CheckpointManager, RunState
 from src.common import utc_now
+from src.m4_config import M4Config
 from src.m4_orchestrator import create_or_resume_m4
 from src.m4_parent import M4ParentError, verify_accepted_m3_parent
 from src.source_channels import SOURCE_CLASSES
@@ -124,3 +125,39 @@ def test_full_m4_cpu_run_is_complete_but_blocked_math(tmp_path: Path) -> None:
         'normalized_primal',
         *(f'normalized_tangent_{source.value}' for source in SOURCE_CLASSES),
     } <= set(loaded.tensors)
+
+
+def test_child_m3_audit_rewrite_accepts_nondefault_checkpoint_index(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import asdict
+
+    from src.common import atomic_write_json, atomic_write_text, read_json, sha256_file
+    from src.m7_staged_lineage import write_child_m3_acceptance_audit
+
+    config, project = make_synthetic_accepted_m3(tmp_path)
+    parent_run = Path(config.parent_checkpoint_path).parents[1]
+    ckpt = Path(config.parent_checkpoint_path)
+    state = read_json(ckpt / 'state.json')
+    assert isinstance(state, dict)
+    state['checkpoint_index'] = 16
+    atomic_write_json(ckpt / 'state.json', state)
+    hashes = {
+        path.relative_to(ckpt).as_posix(): sha256_file(path)
+        for path in ckpt.rglob('*')
+        if path.is_file() and path.name not in {'hashes.json', 'COMMITTED'}
+    }
+    atomic_write_json(ckpt / 'hashes.json', hashes)
+    atomic_write_text(ckpt / 'COMMITTED', utc_now())
+    audit = write_child_m3_acceptance_audit(project, run_root=parent_run)
+    assert audit['checkpoint_index'] == 16
+    assert audit['accepted_run_id'] == config.parent_run_id
+    base = asdict(config)
+    base.update({
+        'parent_checkpoint': Path(audit['checkpoint_path']).name,
+        'parent_checkpoint_path': audit['checkpoint_path'],
+        'parent_report_path': audit['m3_report_path'],
+        'parent_acceptance_path': audit['m3_acceptance_path'],
+    })
+    evidence = verify_accepted_m3_parent(project, M4Config(**base))
+    assert evidence.hashes['m3_audit_sha256']

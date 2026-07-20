@@ -77,12 +77,14 @@ def _verify_checkpoint(checkpoint: Path) -> str:
     return sha256_file(hashes_path)
 
 
-def _verify_queue(checkpoint: Path, config: M4Config) -> WorkQueue:
+def _verify_queue(
+    checkpoint: Path, config: M4Config, *, checkpoint_index: int,
+) -> WorkQueue:
     state = read_json(checkpoint / 'state.json')
     if not isinstance(state, dict) or any((
         state.get('run_id') != config.parent_run_id,
         state.get('phase') != 'M3_COMPLETE',
-        state.get('checkpoint_index') != 14,
+        state.get('checkpoint_index') != checkpoint_index,
         state.get('certification_status') != 'NOT_CERTIFIED',
     )):
         raise M4ParentError('Accepted M3 checkpoint state is invalid.')
@@ -182,7 +184,6 @@ def verify_accepted_m3_parent(
         'accepted_for_next_milestone': 'M4',
         'accepted_phase': 'M3_COMPLETE',
         'accepted_run_id': config.parent_run_id,
-        'checkpoint_index': 14,
         'decision': 'ACCEPT_M3_FOR_M4_FORWARD_DERIVATIVE_IMPLEMENTATION',
         'certification_status': 'NOT_CERTIFIED',
         'independent_artifact_reload_performed': True,
@@ -191,19 +192,29 @@ def verify_accepted_m3_parent(
         audit.get(key) != value for key, value in expected_audit.items()
     ):
         raise M4ParentError('M3 acceptance audit identity or decision is invalid.')
+    if (
+        not isinstance(audit.get('checkpoint_index'), int)
+        or isinstance(audit.get('checkpoint_index'), bool)
+        or audit['checkpoint_index'] < 1
+    ):
+        raise M4ParentError('M3 acceptance audit checkpoint index is invalid.')
     report_path = Path(config.parent_report_path).resolve()
     acceptance_path = Path(config.parent_acceptance_path).resolve()
     checkpoint = Path(config.parent_checkpoint_path).resolve()
     manifest_path = checkpoint.parents[1] / 'run_manifest.json'
-    for key, path in {
+    path_keys = {
         'm3_report_path': report_path,
         'm3_acceptance_path': acceptance_path,
         'checkpoint_path': checkpoint,
-        'manifest_path': manifest_path,
-    }.items():
+    }
+    if 'manifest_path' in audit:
+        path_keys['manifest_path'] = manifest_path
+    for key, path in path_keys.items():
         audited = audit.get(key)
         if not isinstance(audited, str) or Path(audited).resolve() != path:
             raise M4ParentError(f'Accepted M3 path changed: {key}')
+    if checkpoint.name != config.parent_checkpoint:
+        raise M4ParentError('Accepted M3 checkpoint name changed.')
     report_hash = _verify_file(
         report_path, audit.get('m3_report_sha256'), 'accepted M3 report',
     )
@@ -217,7 +228,9 @@ def verify_accepted_m3_parent(
     checkpoint_hash = _verify_checkpoint(checkpoint)
     if checkpoint_hash != audit.get('checkpoint_hash_manifest_sha256'):
         raise M4ParentError('Accepted M3 checkpoint manifest changed.')
-    queue = _verify_queue(checkpoint, config)
+    queue = _verify_queue(
+        checkpoint, config, checkpoint_index=int(audit['checkpoint_index']),
+    )
     report = read_json(report_path)
     if not isinstance(report, dict) or any((
         report.get('run_id') != config.parent_run_id,
