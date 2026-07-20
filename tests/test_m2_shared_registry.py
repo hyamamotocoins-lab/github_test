@@ -430,6 +430,50 @@ def test_shared_token_reuses_legacy_notebook_proof_slot(tmp_path: Path) -> None:
     assert found['canonical_run_id'] == run.name
 
 
+def test_structural_complete_fallback_allows_source_drift(tmp_path: Path) -> None:
+    from src.m2_compatibility import SHARED_M2_NOTEBOOK_TOKEN, keys_from_run_artifacts
+    from src.m2_shared_registry import (
+        alias_shared_m2_under_proof_key,
+        find_complete_shared_run_on_disk,
+        lookup_shared_m2_reusable,
+        register_shared_m2_from_run,
+    )
+
+    persist = tmp_path / 'persist'
+    run = persist / 'runs' / 'M2-SHARED-aaaaaaaa-2a1706d8eb5f'
+    _fake_complete_m2(run, source_hash='old-src')
+    # Patch structural key prefix into a fixed 64-char key starting with aaaaaaaa
+    record = register_shared_m2_from_run(persist, run, registration_mode=MODE_STRICT)
+    sk = record['structural_key']
+    # Rename run to match structural prefix used by finder.
+    new_name = f'M2-SHARED-{sk[:8]}-2a1706d8eb5f'
+    new_run = persist / 'runs' / new_name
+    run.rename(new_run)
+    record['canonical_run_id'] = new_name
+    record['canonical_run_root'] = str(new_run)
+    atomic_write_json(
+        persist / 'shared_m2_registry' / sk / 'proofs' / record['proof_key'] / 'canonical_run.json',
+        record,
+    )
+
+    found, hit = lookup_shared_m2_reusable(
+        persist, sk, 'f' * 64, source_hash='new-src-after-pull',
+    )
+    assert found is not None
+    assert hit == 'structural_complete_fallback'
+    assert found['canonical_run_id'] == new_name
+
+    disk = find_complete_shared_run_on_disk(persist, sk)
+    assert disk is not None
+    assert disk.name == new_name
+
+    aliased = alias_shared_m2_under_proof_key(
+        persist, found, structural_key=sk, proof_key='f' * 64,
+    )
+    assert aliased['proof_key'] == 'f' * 64
+    assert lookup_shared_m2(persist, sk, 'f' * 64) is not None
+
+
 def test_package_audits_do_not_clobber(tmp_path: Path) -> None:
     persist = tmp_path / 'persist'
     run = persist / 'runs' / 'M2-shared'

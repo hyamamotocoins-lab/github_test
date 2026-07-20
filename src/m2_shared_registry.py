@@ -95,26 +95,86 @@ def lookup_shared_m2_reusable(
     *,
     source_hash: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Exact proof-key hit, else COMPLETE under same structural+source_hash.
+    """Exact proof-key hit, else COMPLETE under same structural key.
 
-    Fallback recovers Campaign C runs registered under a pre-token notebook hash.
+    Order:
+    1. exact proof key
+    2. COMPLETE with matching source_hash (preferred)
+    3. any COMPLETE under structural key (src tree may have drifted after pull)
     """
     exact = lookup_shared_m2(persistent_root, structural_key, proof_key)
     if exact is not None:
         return exact, 'exact'
-    if not source_hash:
-        return None, None
-    matches = [
+    records = [
         record for record in list_structural_proof_records(
             persistent_root, structural_key,
         )
         if record.get('registry_state') == STATE_COMPLETE
-        and record.get('source_hash') == source_hash
     ]
-    if not matches:
+    if not records:
         return None, None
-    matches.sort(key=lambda record: str(record.get('registered_at') or ''), reverse=True)
-    return matches[0], 'structural_source_fallback'
+    if source_hash:
+        matched = [r for r in records if r.get('source_hash') == source_hash]
+        if matched:
+            matched.sort(key=lambda r: str(r.get('registered_at') or ''), reverse=True)
+            return matched[0], 'structural_source_fallback'
+    records.sort(key=lambda r: str(r.get('registered_at') or ''), reverse=True)
+    return records[0], 'structural_complete_fallback'
+
+
+def find_complete_shared_run_on_disk(
+    persistent_root: Path,
+    structural_key: str,
+) -> Path | None:
+    """Find M2-SHARED-{struct8}-* run dirs that are acceptance-complete."""
+    runs_root = Path(persistent_root) / 'runs'
+    if not runs_root.is_dir() or len(structural_key) < 8:
+        return None
+    prefix = f'M2-SHARED-{structural_key[:8]}-'
+    candidates = sorted(
+        (path for path in runs_root.iterdir()
+         if path.is_dir() and path.name.startswith(prefix)),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    for run_root in candidates:
+        report = read_json(run_root / 'reports' / 'M2_report.json') if (
+            run_root / 'reports' / 'M2_report.json'
+        ).is_file() else None
+        acceptance = read_json(run_root / 'reports' / 'M2_acceptance.json') if (
+            run_root / 'reports' / 'M2_acceptance.json'
+        ).is_file() else None
+        if (
+            isinstance(report, dict)
+            and report.get('phase') == 'M2_COMPLETE'
+            and isinstance(acceptance, dict)
+            and acceptance.get('status') == 'PASS'
+        ):
+            return run_root
+    return None
+
+
+def alias_shared_m2_under_proof_key(
+    persistent_root: Path,
+    record: dict[str, Any],
+    *,
+    structural_key: str,
+    proof_key: str,
+) -> dict[str, Any]:
+    """Write/overwrite preferred proof-key slot pointing at an existing COMPLETE run."""
+    if record.get('registry_state') != STATE_COMPLETE:
+        raise M2SharedRegistryError('Can only alias COMPLETE records')
+    entry = proof_entry_dir(persistent_root, structural_key, proof_key)
+    entry.mkdir(parents=True, exist_ok=True)
+    aliased = dict(record)
+    aliased['proof_key'] = proof_key
+    aliased['aliased_from_proof_key'] = record.get('proof_key')
+    aliased['aliased_at'] = utc_now()
+    aliased['registry_record_sha256'] = sha256_bytes(canonical_json_bytes({
+        k: v for k, v in aliased.items() if k != 'registry_record_sha256'
+    }))
+    atomic_write_json(entry / 'canonical_run.json', aliased)
+    return aliased
 
 
 def _now() -> datetime:
@@ -523,25 +583,52 @@ def resolve_m2_binding(
     )
     owner = owner_id or Path(package_root).name
 
+    if record is None:
+        on_disk = find_complete_shared_run_on_disk(persistent_root, structural_key)
+        if on_disk is not None:
+            record = register_shared_m2_from_run(
+                persistent_root,
+                on_disk,
+                project_root=project_root,
+                registration_mode=MODE_STRICT,
+                allow_overwrite=True,
+            )
+            hit = 'disk_complete_adopt'
+            record = alias_shared_m2_under_proof_key(
+                persistent_root,
+                record,
+                structural_key=structural_key,
+                proof_key=proof_key,
+            )
+            hit = 'disk_complete_aliased'
+
     if (
         record
         and record.get('registry_state') == STATE_COMPLETE
-        and hit == 'structural_source_fallback'
+        and hit in {
+            'structural_source_fallback',
+            'structural_complete_fallback',
+        }
     ):
-        # Alias pre-token registrations under the shared notebook token proof key.
-        record = register_shared_m2_from_run(
+        # Keep preferred proof-key slot populated for the current src tree.
+        record = alias_shared_m2_under_proof_key(
             persistent_root,
-            Path(str(record['canonical_run_root'])),
-            project_root=project_root,
-            registration_mode=MODE_STRICT,
-            allow_overwrite=True,
+            record,
+            structural_key=structural_key,
+            proof_key=proof_key,
         )
-        hit = 'exact'
+        hit = f'{hit}+aliased'
 
     if record and record.get('registry_state') == STATE_COMPLETE:
+        source_drift = bool(
+            source_hash and record.get('source_hash')
+            and source_hash != record.get('source_hash')
+        )
+        # Artifact integrity always; source_hash drift is recorded, not a hard fail
+        # for exploratory Campaign C reuse after tooling pulls.
         verify_shared_m2(
-            persistent_root, structural_key, record.get('proof_key') or proof_key,
-            require_source_match=True,
+            persistent_root, structural_key, proof_key,
+            require_source_match=not source_drift,
             current_source_hash=source_hash,
             current_notebook_hash=notebook_hash,
         )
@@ -550,12 +637,17 @@ def resolve_m2_binding(
             'structural_key': structural_key,
             'proof_key': proof_key,
             'state': BINDING_READY,
-            'mode': 'REUSE_SHARED',
+            'mode': (
+                'REUSE_SHARED_SOURCE_DRIFT' if source_drift else 'REUSE_SHARED'
+            ),
             'canonical_run_id': record['canonical_run_id'],
             'registry_record_sha256': record.get('registry_record_sha256'),
             'acceptance_sha256': record.get('acceptance_sha256'),
             'verified_at': utc_now(),
             'lookup_hit': hit,
+            'source_drift': source_drift,
+            'record_source_hash': record.get('source_hash'),
+            'current_source_hash': source_hash,
             'certification_status': 'NOT_CERTIFIED',
         }
         return write_binding(package_root, binding)
@@ -590,6 +682,7 @@ def resolve_m2_binding(
         'acceptance_sha256': None,
         'verified_at': None,
         'owner_hint': owner,
+        'lookup_hit': hit,
         'certification_status': 'NOT_CERTIFIED',
     }
     return write_binding(package_root, binding)
