@@ -4,7 +4,10 @@ from pathlib import Path
 from typing import Any
 
 from .checkpoint import CheckpointSaveResult, RunState
-from .common import atomic_write_json, atomic_write_text, read_json, sha256_file, utc_now
+from .common import (
+    atomic_write_json, atomic_write_text, read_json, safe_component, sha256_file,
+    utc_now,
+)
 from .m2_config import M2Config
 from .reporting import peak_memory_report
 from .work_queue import WorkQueue
@@ -36,6 +39,21 @@ def load_m2_phase_results(
             raise RuntimeError(f'Malformed M2 phase artifact: {item.phase}')
         if payload.get('certification_status') != 'NOT_CERTIFIED':
             raise RuntimeError(f'M2 phase artifact changed certification status: {item.phase}')
+        if item.phase == 'M2_WIGNER_CACHE':
+            result = payload.get('result')
+            if not isinstance(result, dict):
+                raise RuntimeError('Malformed M2 Wigner result.')
+            for filename_key, digest_key in (
+                ('cache_filename', 'cache_sha256'),
+                ('regenerated_filename', 'regenerated_sha256'),
+            ):
+                filename = result.get(filename_key)
+                digest = result.get(digest_key)
+                if not isinstance(filename, str) or safe_component(filename) != filename:
+                    raise RuntimeError('Unsafe M2 Wigner cache filename.')
+                cache_path = result_path.parent / filename
+                if not cache_path.is_file() or sha256_file(cache_path) != digest:
+                    raise RuntimeError('M2 Wigner cache artifact hash mismatch.')
         results[item.phase] = payload
     return results
 

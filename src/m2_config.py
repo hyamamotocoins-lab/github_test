@@ -32,6 +32,7 @@ class M2Config:
     j2_max: int = 1
     leg_count: int = 6
     orientations: tuple[int, ...] = (1, -1, 1, -1, 1, -1)
+    seed: int = 20260720
     exact_decimal_digits: int = 80
     checkpoint_interval_s: float = 15.0 * 60.0
     max_work_item_s: float = 20.0 * 60.0
@@ -65,7 +66,7 @@ class M2Config:
         if Path(self.parent_audit_path).as_posix() != 'audit/m1_accepted_parent.json':
             raise ValueError('M2 audit path is fixed and may not be silently changed.')
         integer_fields = (
-            self.j2_max, self.leg_count, self.exact_decimal_digits,
+            self.j2_max, self.leg_count, self.seed, self.exact_decimal_digits,
             self.tensor_shard_bytes, self.max_item_attempts,
         ) + self.orientations
         if any(
@@ -77,6 +78,8 @@ class M2Config:
             raise ValueError('M2 is deliberately fail-closed at six legs and j2_max=1.')
         if self.orientations != (1, -1, 1, -1, 1, -1):
             raise ValueError('M2 fixed link orientation convention changed.')
+        if not 0 <= self.seed < 2**32:
+            raise ValueError('M2 seed must satisfy 0 <= seed < 2**32.')
         if self.exact_decimal_digits < 64:
             raise ValueError('M2 diagnostic decimal precision is below the safe floor.')
         if self.tensor_shard_bytes <= 0 or self.max_item_attempts < 1:

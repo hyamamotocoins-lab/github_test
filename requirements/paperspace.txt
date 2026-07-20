@@ -1,1 +1,2 @@
 pytest>=8
+sympy>=1.12
