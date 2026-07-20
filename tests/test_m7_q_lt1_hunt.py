@@ -30,10 +30,10 @@ def test_mint_run_id_format() -> None:
 
 def test_diagnose_recommends_new_search_when_best_staged_ge_1(tmp_path: Path) -> None:
     persist = tmp_path / 'persist'
-    search = persist / 'searches' / 'M7-old'
+    search = persist / 'searches' / 'M7-20260720T081500Z-c8d5f02b3c96'
     reports = search / 'reports'
     reports.mkdir(parents=True)
-    atomic_write_json(search / 'LOCK.json', {'run_id': 'M7-old'})
+    atomic_write_json(search / 'LOCK.json', {'run_id': 'M7-20260720T081500Z-c8d5f02b3c96'})
     atomic_write_json(reports / 'candidate_ranking.json', {
         'ranking': [
             _ranking_row('CAND-a', 2, 1.011),
@@ -53,12 +53,41 @@ def test_diagnose_recommends_new_search_when_best_staged_ge_1(tmp_path: Path) ->
             'instant_executable': cand == 'CAND-b',
             'executable': cand == 'CAND-b',
         })
-    diag = diagnose_q_lt1_hunt(persistent_root=persist, search_run_id='M7-old')
+    diag = diagnose_q_lt1_hunt(
+        persistent_root=persist,
+        search_run_id='M7-20260720T081500Z-c8d5f02b3c96',
+    )
     assert diag['recommendation'] == 'NEW_EXPANDED_CAMPAIGN_C_SEARCH'
     assert diag['best_staged']['estimated_q'] == 1.011
     actions = next_q_lt1_actions(diag)
     assert actions['action'] == 'notebook_86_new_search'
     assert actions['suggested_run_id'].startswith('M7-')
+
+
+def test_diagnose_qlt1_hunt_exhausted_routes_to_campaign_b(tmp_path: Path) -> None:
+    persist = tmp_path / 'persist'
+    run_id = 'M7-20260720T143128Z-qlt1c'
+    search = persist / 'searches' / run_id
+    reports = search / 'reports'
+    reports.mkdir(parents=True)
+    atomic_write_json(search / 'LOCK.json', {'run_id': run_id})
+    atomic_write_json(reports / 'candidate_ranking.json', {
+        'ranking': [_ranking_row('CAND-a', 2, 1.011)],
+    })
+    pkg = search / 'auto_execute' / 'CAND-a'
+    pkg.mkdir(parents=True)
+    atomic_write_json(pkg / 'MANIFEST.json', {'candidate_id': 'CAND-a'})
+    atomic_write_json(pkg / 'child_run_ids.json', {'M2': 'M2-a'})
+    atomic_write_json(pkg / 'scheme.json', {'j2_max': 2})
+    atomic_write_json(pkg / 'resource_gate.json', {
+        'staged_executable': True,
+        'instant_executable': False,
+        'executable': False,
+    })
+    diag = diagnose_q_lt1_hunt(persistent_root=persist, search_run_id=run_id)
+    assert diag['recommendation'] == 'CAMPAIGN_C_S3_EXHAUSTED_GOTO_B'
+    actions = next_q_lt1_actions(diag)
+    assert actions['action'] == 'notebook_86_campaign_b'
 
 
 def test_diagnose_finds_staged_q_lt1(tmp_path: Path) -> None:
