@@ -6,6 +6,7 @@ from src.interval_kernel import construct
 from src.m4_config import M4Config
 from src.m7_lineage import (
     apply_s2_residual_model,
+    apply_s3_cutoff_model,
     effective_projected_rank,
     is_perfect_square,
 )
@@ -44,3 +45,16 @@ def test_residual_model_shrinks_high_rank() -> None:
     )
     assert shrunk[0][0].hi < Fraction(2)
     assert shrunk[0][0].hi < 1  # core 2/5 after residual wipe is 0.8
+
+
+def test_s3_cutoff_model_can_shrink_below_one() -> None:
+    entries = [[construct('2'), construct('0')], [construct('0'), construct('2')]]
+    shrunk = apply_s3_cutoff_model(
+        entries,
+        parent_j2_max=1,
+        j2_max=4,
+        channel_policy='certified_pruned',
+        block_geometry='approved_geometry_B',
+        truncation_fraction=Fraction(7, 10),
+    )
+    assert shrunk[0][0].hi < 1

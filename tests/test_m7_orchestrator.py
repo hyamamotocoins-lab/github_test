@@ -120,3 +120,58 @@ def test_m7_campaign_b_fixture_residual_can_certify(tmp_path: Path) -> None:
     acceptance = read_json(orch.search_root / 'final_package' / 'M7_acceptance.json')
     assert acceptance['independent_verifier'] == 'PASS'
     assert acceptance.get('campaign') == 'B'
+
+
+def test_m7_campaign_c_plan_only_emits_s3_lineage_plans(tmp_path: Path) -> None:
+    project = tmp_path / 'project'
+    persist = tmp_path / 'persist'
+    _seed(project)
+    from src.m7_orchestrator import M7Orchestrator
+    orch = M7Orchestrator(project, persist, default_m7_config(
+        parent_m6_run_id='M6-fixture',
+        run_id='M7-fixture-c-plan',
+        mode='cpu_fixture',
+        campaign='C',
+        lineage_mode='plan_only',
+        max_candidates_total=4,
+        max_rigorous_replays=4,
+        human_review_approved=False,
+    ))
+    summary = orch.run_search()
+    assert summary['phase'] == M7_COMPLETE
+    assert summary['search_status'] == M7_LINEAGE_PLANNED
+    assert summary['accepted'] is None
+    assert summary['lineage_plans'] == 4
+    from src.common import read_json
+    doc = read_json(orch.search_root / 'reports' / 'lineage_plans.json')
+    assert doc['plans'][0]['change_class'] == 'S3'
+    assert 'M2' in doc['plans'][0]['child_run_ids']
+    assert set(doc['plans'][0]['invalidated_nodes']) >= {'M2', 'M3', 'M4', 'M5', 'M6'}
+
+
+def test_m7_campaign_c_fixture_cutoff_can_certify(tmp_path: Path) -> None:
+    project = tmp_path / 'project'
+    persist = tmp_path / 'persist'
+    _seed(project)
+    config = default_m7_config(
+        parent_m6_run_id='M6-fixture',
+        run_id='M7-fixture-c-cert',
+        mode='cpu_fixture_campaign_c',
+        campaign='C',
+        lineage_mode='fixture_residual',
+        max_candidates_total=4,
+        max_rigorous_replays=2,
+        max_lineage_replays=2,
+        stop_on_first_certified=True,
+        human_review_approved=True,
+    )
+    orch = create_or_resume_m7(persist, config, project)
+    summary = orch.run_search()
+    assert summary['phase'] == M7_COMPLETE
+    assert summary['search_status'] == M7_CERTIFIED_SCHEME_FOUND
+    assert summary['accepted'] is not None
+    assert float(summary['accepted']['q_cert_upper']) < 1
+    from src.common import read_json
+    acceptance = read_json(orch.search_root / 'final_package' / 'M7_acceptance.json')
+    assert acceptance['independent_verifier'] == 'PASS'
+    assert acceptance.get('campaign') == 'C'

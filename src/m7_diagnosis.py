@@ -135,19 +135,21 @@ def diagnose_m6_package(
             'denominator_hex': format(max_row.denominator, 'x'),
         },
         'row_sum_uppers': row_sum_uppers,
-        'recommended_campaign': 'B' if DIAG_D0 in codes else 'A',
+        'recommended_campaign': 'C' if DIAG_D0 in codes else 'A',
         'notes': (
             'q_cert >= 1 is a certificate failure of the declared majorant, '
             'not a proof that the true RG map is expansive. '
             'Campaign A (S0 reweight / identical-step product) cannot beat '
-            'spectral radius of an inherited expanding majorant.'
+            'spectral radius of an inherited expanding majorant. '
+            'Campaign B screening with residual-share≈20% leaves a core floor '
+            '≳2 on the current parent; promote Campaign C (geometry/cutoff).'
         ),
         'next_actions': [
             'Campaign A exhausted for inherited majorant with q≈2.5: S0 cannot '
             'push Collatz below rho.',
-            'Promote Campaign B (S2): increase target_rank / tighten residuals '
-            'and rebuild M3→M6 lineage under LOCK.',
-            'In parallel, implement true stage-dependent B_r (not B^K of the '
-            'same inherited matrix).',
+            'Campaign B residual screening is inconclusive/core-dominated; '
+            'do not expect rank-alone certification on this parent.',
+            'Promote Campaign C (S3): j2_max / channel_policy / block_geometry '
+            'with human review; unlock M2/M3 for j2_max>1 before execute.',
         ],
     }

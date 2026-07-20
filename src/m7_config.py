@@ -8,6 +8,7 @@ from typing import Any
 from .m7_status import (
     M6_PARENT_RUN_ID_FROZEN,
     M7_RUN_ID_CAMPAIGN_B,
+    M7_RUN_ID_CAMPAIGN_C,
     M7_RUN_ID_FROZEN,
 )
 
@@ -17,7 +18,8 @@ class M7Config:
     parent_m6_run_id: str = M6_PARENT_RUN_ID_FROZEN
     run_id: str = M7_RUN_ID_FROZEN
     mode: str = 'paperspace'
-    # paperspace | cpu_fixture_cert | cpu_fixture_search | cpu_fixture_campaign_b
+    # paperspace | cpu_fixture_cert | cpu_fixture_search
+    # | cpu_fixture_campaign_b | cpu_fixture_campaign_c
     max_candidates_total: int = 64
     max_rigorous_replays: int = 16
     stop_on_first_certified: bool = True
@@ -26,10 +28,13 @@ class M7Config:
     promotion_estimated_q: str = '9/10'
     campaign: str = 'A'
     num_steps: int = 3
-    # Campaign B lineage: plan_only | fixture_residual | execute
+    # Campaign B/C lineage: plan_only | fixture_residual | execute
     lineage_mode: str = 'plan_only'
     max_lineage_replays: int = 2
     parent_rank: int = 16
+    parent_j2_max: int = 1
+    # Design: Campaign C requires human review before lineage execution.
+    human_review_approved: bool = False
 
     def payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -41,9 +46,12 @@ def default_m7_config(**overrides: Any) -> M7Config:
         return base
     payload = asdict(base)
     payload.update(overrides)
-    if payload.get('campaign') == 'B' and 'run_id' not in overrides:
+    campaign = payload.get('campaign')
+    if campaign == 'B' and 'run_id' not in overrides:
         payload['run_id'] = M7_RUN_ID_CAMPAIGN_B
-    if payload.get('campaign') == 'B' and 'lineage_mode' not in overrides:
+    if campaign == 'C' and 'run_id' not in overrides:
+        payload['run_id'] = M7_RUN_ID_CAMPAIGN_C
+    if campaign in {'B', 'C'} and 'lineage_mode' not in overrides:
         if str(payload.get('mode', '')).startswith('cpu_fixture'):
             payload['lineage_mode'] = 'fixture_residual'
         else:
@@ -108,7 +116,52 @@ def campaign_b_search_space() -> dict[str, Any]:
     }
 
 
+def campaign_c_search_space() -> dict[str, Any]:
+    """Algebraic / geometry layer (S3): cutoff, channels, block geometry."""
+    return {
+        'schema_version': 1,
+        'campaign': 'C',
+        'requires_human_review': True,
+        'layers': {
+            'j2_max': [1, 2, 3, 4],
+            'channel_policy': [
+                'complete_at_cutoff',
+                'certified_pruned',
+            ],
+            'block_geometry': [
+                'current',
+                'approved_geometry_B',
+            ],
+            'perron_weight_strategy': [
+                'all_ones',
+                'interval_power',
+            ],
+            'coupling_policy': [
+                'uniform_full',
+            ],
+        },
+        'excluded_until_improvement': ['S4'],
+        'math_locks': {
+            'm2_j2_max': (
+                'M2Config currently fail-closed at j2_max=1; j2_max>1 lineage '
+                'execution requires unlocking M2/M3 sector dimensions under a '
+                'new governing-document revision.'
+            ),
+            'm3_pilot': (
+                'M3Config is fixed at sector_count=64, operator_dimension=729 '
+                'for j2_max=1. Higher cutoff changes the entire M2→M6 DAG.'
+            ),
+        },
+        'notes': (
+            'Campaign C invalidates M2–M6. plan_only emits LOCK lineage plans '
+            'for human review; execute requires human_review_approved=True.'
+        ),
+    }
+
+
 def search_space_for_campaign(campaign: str) -> dict[str, Any]:
     if campaign == 'B':
         return campaign_b_search_space()
+    if campaign == 'C':
+        return campaign_c_search_space()
     return campaign_a_search_space()

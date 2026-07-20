@@ -1,4 +1,4 @@
-"""M7 candidate generation for Campaign A/B."""
+"""M7 candidate generation for Campaign A/B/C."""
 
 from __future__ import annotations
 
@@ -6,9 +6,13 @@ import hashlib
 from typing import Any
 
 from .common import canonical_json_bytes
-from .m7_config import campaign_a_search_space, campaign_b_search_space
+from .m7_config import (
+    campaign_a_search_space,
+    campaign_b_search_space,
+    campaign_c_search_space,
+)
 from .m7_lineage import effective_projected_rank
-from .m7_status import CHANGE_S0, CHANGE_S1, CHANGE_S2
+from .m7_status import CHANGE_S0, CHANGE_S1, CHANGE_S2, CHANGE_S3
 
 
 def scheme_hash(scheme: dict[str, Any]) -> str:
@@ -140,6 +144,68 @@ def generate_fixture_s2_cert_candidate(
         'seed': 20260720,
         'num_steps': 3,
         'fixture': 's2_residual_model',
+    }
+    return _candidate(0, scheme, parent_m6_run_id, parent_scheme_hash)
+
+
+def generate_campaign_c_candidates(
+    *,
+    parent_m6_run_id: str,
+    parent_scheme_hash: str,
+    limit: int = 64,
+) -> list[dict[str, Any]]:
+    """S3 algebraic/geometry candidates (cutoff / channels / block geometry)."""
+    space = campaign_c_search_space()
+    layers = space['layers']
+    candidates: list[dict[str, Any]] = []
+    index = 0
+    # Prefer higher cutoffs and non-current geometry first.
+    j2_values = sorted((int(v) for v in layers['j2_max']), reverse=True)
+    geometries = list(reversed(list(layers['block_geometry'])))
+    for j2_max in j2_values:
+        for channel_policy in layers['channel_policy']:
+            for block_geometry in geometries:
+                for strategy in layers['perron_weight_strategy']:
+                    for coupling in layers['coupling_policy']:
+                        index += 1
+                        scheme = {
+                            'change_class': CHANGE_S3,
+                            'majorant_policy': 'S3_GEOMETRY_CUTOFF_LINEAGE',
+                            'j2_max': int(j2_max),
+                            'channel_policy': channel_policy,
+                            'block_geometry': block_geometry,
+                            'perron_weight_strategy': strategy,
+                            'coupling_policy': coupling,
+                            'seed': 20260720,
+                            'num_steps': 3,
+                        }
+                        candidates.append(
+                            _candidate(
+                                index, scheme, parent_m6_run_id, parent_scheme_hash,
+                            )
+                        )
+                        if len(candidates) >= limit:
+                            return candidates
+    return candidates
+
+
+def generate_fixture_s3_cert_candidate(
+    *,
+    parent_m6_run_id: str,
+    parent_scheme_hash: str,
+) -> dict[str, Any]:
+    """High-cutoff S3 fixture intended to pass cutoff-model Collatz (<1)."""
+    scheme = {
+        'change_class': CHANGE_S3,
+        'majorant_policy': 'S3_GEOMETRY_CUTOFF_LINEAGE',
+        'j2_max': 4,
+        'channel_policy': 'certified_pruned',
+        'block_geometry': 'approved_geometry_B',
+        'perron_weight_strategy': 'all_ones',
+        'coupling_policy': 'uniform_full',
+        'seed': 20260720,
+        'num_steps': 3,
+        'fixture': 's3_cutoff_model',
     }
     return _candidate(0, scheme, parent_m6_run_id, parent_scheme_hash)
 

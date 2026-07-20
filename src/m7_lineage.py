@@ -1,7 +1,7 @@
-"""Campaign B S2 lineage planning and residual-model evaluation.
+"""Campaign B/C lineage planning and residual/cutoff model evaluation.
 
-Full GPU M3→M6 rebuild is gated by lineage_mode. Fixture residual mode exists
-only for controller tests and must never be treated as a continuum claim.
+Full GPU rebuilds are gated by lineage_mode. Fixture modes exist only for
+controller tests and must never be treated as continuum claims.
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ from .common import atomic_write_json, utc_now
 from .interval_kernel import ProofInterval, construct
 from .m7_collatz_search import coerce_interval, evaluate_collatz
 from .m7_replay import _pack, perron_for_strategy
-from .m7_status import CHANGE_S2
+from .m7_status import CHANGE_S2, CHANGE_S3
 
 
 class M7LineageError(RuntimeError):
-    """Raised when an S2 lineage plan or residual model cannot proceed."""
+    """Raised when a lineage plan or residual/cutoff model cannot proceed."""
 
 
 def is_perfect_square(value: int) -> bool:
@@ -237,4 +237,199 @@ def screen_s2_candidate(
         'm4_geometry_compatible': is_perfect_square(projected),
         'certified': False,
         'notes': 'Screening only; CERTIFIED is forbidden from screening.',
+    }
+
+
+def build_s3_lineage_plan(
+    candidate: dict[str, Any],
+    *,
+    parent_m6_run_id: str,
+    search_run_id: str,
+    parent_j2_max: int = 1,
+) -> dict[str, Any]:
+    scheme = candidate.get('scheme') or {}
+    j2_max = int(scheme.get('j2_max', parent_j2_max))
+    channel_policy = str(scheme.get('channel_policy', 'complete_at_cutoff'))
+    block_geometry = str(scheme.get('block_geometry', 'current'))
+    digest = str(candidate.get('candidate_id', 'CAND')).replace('CAND-', '')[:12]
+    tag = search_run_id[3:11]
+    m2_id = f'M2-{tag}S3-{digest}'
+    m3_id = f'M3-{tag}S3-{digest}'
+    m4_id = f'M4-{tag}S3-{digest}'
+    m5_id = f'M5-{tag}S3-{digest}'
+    m6_id = f'M6-{tag}S3-{digest}'
+    execution_blocked = j2_max != 1
+    return {
+        'schema_version': 1,
+        'change_class': CHANGE_S3,
+        'candidate_id': candidate.get('candidate_id'),
+        'scheme_hash': candidate.get('scheme_hash'),
+        'parent_m6_run_id': parent_m6_run_id,
+        'search_run_id': search_run_id,
+        'parameters': {
+            'j2_max': j2_max,
+            'parent_j2_max': parent_j2_max,
+            'channel_policy': channel_policy,
+            'block_geometry': block_geometry,
+            'seed': int(scheme.get('seed', 20260720)),
+        },
+        'child_run_ids': {
+            'M2': m2_id,
+            'M3': m3_id,
+            'M4': m4_id,
+            'M5': m5_id,
+            'M6': m6_id,
+        },
+        'invalidated_nodes': ['M2', 'M3', 'M4', 'M5', 'M6'],
+        'reused_artifacts': ['M1', 'M0'],
+        'execution_blocked_by_math_lock': execution_blocked,
+        'execution_steps': [
+            'HUMAN REVIEW: approve Campaign C scheme + governing-doc delta',
+            'Unlock M2Config/M3Config for j2_max (and derived sector dims) if >1',
+            'create_or_resume_m2 with j2_max / block_geometry / channel_policy',
+            'ACCEPT M2 → rewrite audit/m2_accepted_parent.json',
+            'create_or_resume_m3 on new M2 (sector_count/operator_dimension must match)',
+            'ACCEPT M3 → M4 → M5 → M6 child lineage (non-paperspace run IDs)',
+            'Feed child final_certificate into M7 independent verifier',
+        ],
+        'notes': (
+            'S3 requires a new M2→M6 lineage under LOCK and human review. '
+            'Current M2/M3 pilots are fail-closed at j2_max=1; higher cutoffs '
+            'need dimension unlock before execute. '
+            'q_cert>=1 on the child remains certificate failure only.'
+        ),
+        'generated_at': utc_now(),
+    }
+
+
+def apply_s3_cutoff_model(
+    entries: list[list[Any]],
+    *,
+    parent_j2_max: int,
+    j2_max: int,
+    channel_policy: str,
+    block_geometry: str,
+    truncation_fraction: Fraction = Fraction(7, 10),
+) -> list[list[ProofInterval]]:
+    """Optimistic cutoff/geometry shrink for fixture/controller tests only."""
+    if j2_max < 1 or parent_j2_max < 1:
+        raise M7LineageError('j2_max values must be positive.')
+    # Higher cutoff reduces representation truncation; geometry_B / pruned
+    # channels add mild extra shrink (screening-style, not a proof).
+    cutoff_factor = Fraction(parent_j2_max, j2_max) ** 2
+    channel_factor = (
+        Fraction(4, 5) if channel_policy == 'certified_pruned' else Fraction(1)
+    )
+    geometry_factor = (
+        Fraction(3, 4) if block_geometry == 'approved_geometry_B' else Fraction(1)
+    )
+    shrink = cutoff_factor * channel_factor * geometry_factor
+    if shrink > 1:
+        shrink = Fraction(1)
+    rebuilt: list[list[ProofInterval]] = []
+    for row in entries:
+        out_row: list[ProofInterval] = []
+        for cell in row:
+            core, truncation = _split_core_residual(cell, truncation_fraction)
+            new_hi = core.hi + truncation.hi * shrink
+            out_row.append(construct(0, new_hi))
+        rebuilt.append(out_row)
+    return rebuilt
+
+
+def evaluate_s3_fixture_cutoff(
+    package_root: Path,
+    candidate: dict[str, Any],
+    *,
+    parent_j2_max: int = 1,
+) -> dict[str, Any]:
+    """Rigorous Collatz on a cutoff-shrunk majorant (fixture/controller only)."""
+    from .common import read_json
+
+    scheme = candidate.get('scheme') or {}
+    if scheme.get('change_class') != CHANGE_S3:
+        raise M7LineageError('S3 cutoff model requires change_class=S3.')
+
+    influence = read_json(package_root / 'final_influence_matrix.json')
+    bound = read_json(package_root / 'final_bound.json')
+    if not isinstance(influence, dict):
+        raise M7LineageError('Missing influence matrix for S3 cutoff model.')
+    labels = list(influence.get('labels') or [])
+    entries = influence.get('entries')
+    if not isinstance(entries, list) or not labels:
+        raise M7LineageError('Influence matrix malformed.')
+    outside = construct(0)
+    if isinstance(bound, dict) and isinstance(bound.get('outside_matrix_tail'), dict):
+        outside = bound['outside_matrix_tail']
+
+    j2_max = int(scheme.get('j2_max', parent_j2_max))
+    working = apply_s3_cutoff_model(
+        [list(row) for row in entries],
+        parent_j2_max=parent_j2_max,
+        j2_max=j2_max,
+        channel_policy=str(scheme.get('channel_policy', 'complete_at_cutoff')),
+        block_geometry=str(scheme.get('block_geometry', 'current')),
+    )
+    perron = perron_for_strategy(
+        str(scheme.get('perron_weight_strategy', 'all_ones')),
+        labels,
+        working,
+    )
+    result = evaluate_collatz(working, labels, perron, outside_tail=outside)
+    notes = (
+        f'S3_FIXTURE_CUTOFF_MODEL j2_max {parent_j2_max}->{j2_max}; '
+        'not a live M2→M6 lineage certificate.'
+    )
+    packed = _pack(candidate, result, notes=notes)
+    packed['lineage_mode'] = 'fixture_residual'
+    packed['j2_max'] = j2_max
+    return packed
+
+
+def screen_s3_candidate(
+    candidate: dict[str, Any],
+    *,
+    parent_q_upper: float,
+    parent_j2_max: int = 1,
+) -> dict[str, Any]:
+    """Floating-point S3 screening only — never emits CERTIFIED."""
+    scheme = candidate.get('scheme') or {}
+    j2_max = int(scheme.get('j2_max', parent_j2_max))
+    channel_policy = str(scheme.get('channel_policy', 'complete_at_cutoff'))
+    block_geometry = str(scheme.get('block_geometry', 'current'))
+    # Assume a large share of the failed majorant is cutoff/truncation dominated
+    # when changing algebraic scheme (more optimistic than S2 residual share).
+    truncation_share = 0.70
+    core_share = 1.0 - truncation_share
+    cutoff_factor = (parent_j2_max / max(j2_max, 1)) ** 2
+    channel_factor = 0.80 if channel_policy == 'certified_pruned' else 1.0
+    geometry_factor = 0.75 if block_geometry == 'approved_geometry_B' else 1.0
+    estimated_q = parent_q_upper * (
+        core_share
+        + truncation_share * cutoff_factor * channel_factor * geometry_factor
+    )
+    execution_blocked = j2_max != 1
+    if estimated_q < 0.90 and not execution_blocked:
+        status = 'SCREEN_PROMISING'
+    elif estimated_q < 0.90 and execution_blocked:
+        status = 'SCREEN_INCONCLUSIVE'  # promising numerics, math lock remains
+    elif estimated_q < parent_q_upper * 0.98:
+        status = 'SCREEN_INCONCLUSIVE'
+    else:
+        status = 'SCREEN_REJECTED'
+    return {
+        'schema_version': 1,
+        'candidate_id': candidate.get('candidate_id'),
+        'screen_status': status,
+        'estimated_q': format(estimated_q, '.17g'),
+        'parent_q_upper': format(parent_q_upper, '.17g'),
+        'j2_max': j2_max,
+        'channel_policy': channel_policy,
+        'block_geometry': block_geometry,
+        'execution_blocked_by_math_lock': execution_blocked,
+        'certified': False,
+        'notes': (
+            'Screening only; CERTIFIED is forbidden from screening. '
+            'j2_max>1 requires M2/M3 unlock before execute.'
+        ),
     }
