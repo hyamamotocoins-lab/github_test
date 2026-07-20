@@ -190,20 +190,31 @@ class M2Orchestrator:
         sectors: list[dict[str, Any]] = []
         zero_count = 0
         residual_count = 0
-        for key in keys:
-            dense = build_dense_reference(key.representations, key.orientations)
+        for index, key in enumerate(keys):
+            dim = representation_dimension(key.reps)
+            print(
+                f'M2 dense sector {index + 1}/{len(keys)} '
+                f'reps={list(key.reps)} dim={dim}',
+                flush=True,
+            )
+            dense = build_dense_reference(key.reps, key.orientations)
             residual_count += int(dense.generator_residual_zero)
             is_zero = not any(dense.projector)
-            if sum(key.representations) % 2 and is_zero:
+            if sum(key.reps) % 2 and is_zero:
                 zero_count += 1
             sectors.append({
-                'reps': list(key.representations),
+                'reps': list(key.reps),
                 'orientations': list(key.orientations),
-                'dense_dimension': representation_dimension(key.representations),
+                'dense_dimension': dim,
                 'singlet_rank': dense.singlet_rank,
                 'projector_hash': matrix_hash(dense.projector),
                 'generator_residual_zero': dense.generator_residual_zero,
             })
+            print(
+                f'M2 dense sector done reps={list(key.reps)} '
+                f'rank={dense.singlet_rank} residual_zero={dense.generator_residual_zero}',
+                flush=True,
+            )
         if 'batch_index' not in item.parameters:
             expected = expected_m2_gate_counts(self.config.j2_max)
             if (

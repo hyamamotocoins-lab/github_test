@@ -47,34 +47,56 @@ def _embedded_operator(representations: tuple[int, ...], leg: int, local: Matrix
     return result
 
 
-def total_generators(representations: Iterable[int]) -> tuple[Matrix, Matrix, Matrix]:
-    reps = tuple(representations)
-    if not reps:
+def total_generators(reps: Iterable[int]) -> tuple[Matrix, Matrix, Matrix]:
+    labels = tuple(reps)
+    if not labels:
         raise ValueError('Dense reference requires representation legs.')
-    dimension = representation_dimension(reps)
+    dimension = representation_dimension(labels)
     totals = [zeros(dimension), zeros(dimension), zeros(dimension)]
-    for leg, j2 in enumerate(reps):
+    for leg, j2 in enumerate(labels):
         for component, local in enumerate(_single_generators(j2)):
-            totals[component] += _embedded_operator(reps, leg, local)
-    return tuple(matrix.applyfunc(simplify) for matrix in totals)  # type: ignore[return-value]
+            totals[component] += _embedded_operator(labels, leg, local)
+    # Global applyfunc(simplify) on large Kronecker sums is O(dim^2) and
+    # commonly silent-kills Paperspace workers on j2_max=2 tail sectors.
+    if dimension <= 64:
+        return tuple(matrix.applyfunc(simplify) for matrix in totals)  # type: ignore[return-value]
+    return tuple(totals)  # type: ignore[return-value]
 
 
-def _outgoing_singlet_projector(representations: tuple[int, ...]) -> tuple[Matrix, int, bool]:
-    jz, raising, lowering = total_generators(representations)
+def _outgoing_singlet_projector(reps: tuple[int, ...]) -> tuple[Matrix, int, bool]:
+    jz, raising, lowering = total_generators(reps)
     constraints = Matrix.vstack(jz, raising, lowering)
     nullspace = constraints.nullspace()
-    dimension = representation_dimension(representations)
+    dimension = representation_dimension(reps)
     if not nullspace:
         return zeros(dimension), 0, True
     basis = Matrix.hstack(*nullspace)
-    gram = (basis.T * basis).applyfunc(simplify)
-    projector = (basis * gram.inv() * basis.T).applyfunc(simplify)
+    if dimension <= 64:
+        gram = (basis.T * basis).applyfunc(simplify)
+        projector = (basis * gram.inv() * basis.T).applyfunc(simplify)
+        residual_zero = all(
+            (generator * projector).applyfunc(simplify) == zeros(dimension)
+            for generator in (jz, raising, lowering)
+        )
+        if projector.T != projector or (projector * projector).applyfunc(simplify) != projector:
+            raise ArithmeticError('Dense Haar singlet projector failed exact projector identities.')
+        return projector, len(nullspace), residual_zero
+    gram = basis.T * basis
+    projector = basis * gram.inv() * basis.T
     residual_zero = all(
-        (generator * projector).applyfunc(simplify) == zeros(dimension)
+        generator * projector == zeros(dimension)
         for generator in (jz, raising, lowering)
     )
-    if projector.T != projector or (projector * projector).applyfunc(simplify) != projector:
-        raise ArithmeticError('Dense Haar singlet projector failed exact projector identities.')
+    if projector.T != projector or projector * projector != projector:
+        projector = projector.applyfunc(simplify)
+        residual_zero = all(
+            (generator * projector).applyfunc(simplify) == zeros(dimension)
+            for generator in (jz, raising, lowering)
+        )
+        if projector.T != projector or (projector * projector).applyfunc(simplify) != projector:
+            raise ArithmeticError(
+                'Dense Haar singlet projector failed exact projector identities.',
+            )
     return projector, len(nullspace), residual_zero
 
 

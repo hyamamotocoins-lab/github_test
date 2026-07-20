@@ -124,7 +124,8 @@ def run_staged_m2_session(
 
     faulthandler.enable(file=sys.stderr, all_threads=True)
     os.environ.setdefault('VALIDATED_RG_CHECKPOINT_KEEP', '5')
-    os.environ.setdefault('VALIDATED_RG_M2_SPLIT_BATCH_TO', '2')
+    # High-dim tail sectors (dim hundreds) must run one-at-a-time.
+    os.environ.setdefault('VALIDATED_RG_M2_SPLIT_BATCH_TO', '1')
 
     gate = resource_gate(j2_max)
     if j2_max == 1:
