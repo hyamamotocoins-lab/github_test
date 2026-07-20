@@ -17,6 +17,7 @@ from .common import (
 )
 from .m2_batching import proof_artifact_hash_map
 from .m2_compatibility import (
+    SHARED_M2_NOTEBOOK_TOKEN,
     keys_from_project,
     keys_from_run_artifacts,
     shared_run_id_for_keys,
@@ -67,6 +68,53 @@ def lookup_shared_m2(
         return None
     payload = read_json(path)
     return payload if isinstance(payload, dict) else None
+
+
+def list_structural_proof_records(
+    persistent_root: Path,
+    structural_key: str,
+) -> list[dict[str, Any]]:
+    root = registry_root(persistent_root) / structural_key / 'proofs'
+    if not root.is_dir():
+        return []
+    records: list[dict[str, Any]] = []
+    for entry in sorted(root.iterdir()):
+        path = entry / 'canonical_run.json'
+        if not path.is_file():
+            continue
+        payload = read_json(path)
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
+def lookup_shared_m2_reusable(
+    persistent_root: Path,
+    structural_key: str,
+    proof_key: str,
+    *,
+    source_hash: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Exact proof-key hit, else COMPLETE under same structural+source_hash.
+
+    Fallback recovers Campaign C runs registered under a pre-token notebook hash.
+    """
+    exact = lookup_shared_m2(persistent_root, structural_key, proof_key)
+    if exact is not None:
+        return exact, 'exact'
+    if not source_hash:
+        return None, None
+    matches = [
+        record for record in list_structural_proof_records(
+            persistent_root, structural_key,
+        )
+        if record.get('registry_state') == STATE_COMPLETE
+        and record.get('source_hash') == source_hash
+    ]
+    if not matches:
+        return None, None
+    matches.sort(key=lambda record: str(record.get('registered_at') or ''), reverse=True)
+    return matches[0], 'structural_source_fallback'
 
 
 def _now() -> datetime:
@@ -272,6 +320,7 @@ def register_shared_m2_from_run(
         'checkpoint_hash_manifest_sha256': sha256_file(latest / 'hashes.json'),
         'source_hash': key_info['source_hash'],
         'notebook_hash': key_info['notebook_hash'],
+        'run_notebook_hash': key_info.get('run_notebook_hash'),
         'proof_artifact_hashes': proof_artifact_hash_map(work.items.values()),
         'queue_counts': counts,
         'registry_state': registry_state,
@@ -358,7 +407,12 @@ def verify_shared_m2(
         if current_source_hash and current_source_hash != record.get('source_hash'):
             reasons.append('source_hash mismatch')
         if current_notebook_hash and current_notebook_hash != record.get('notebook_hash'):
-            reasons.append('notebook_hash mismatch')
+            # Shared-registry token may differ from older run-notebook provenance.
+            if (
+                current_notebook_hash != SHARED_M2_NOTEBOOK_TOKEN
+                and record.get('notebook_hash') != SHARED_M2_NOTEBOOK_TOKEN
+            ):
+                reasons.append('notebook_hash mismatch')
 
     status = 'PASS' if not reasons else 'FAIL'
     payload = {
@@ -448,7 +502,7 @@ def resolve_m2_binding(
     project_root: Path,
     package_root: Path,
     j2_max: int,
-    notebook_hash: str = 'notebook-hash-unset',
+    notebook_hash: str = SHARED_M2_NOTEBOOK_TOKEN,
     owner_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve package binding against two-level registry."""
@@ -461,12 +515,32 @@ def resolve_m2_binding(
     )
     structural_key = keys['structural_key']
     proof_key = keys['proof_key']
-    record = lookup_shared_m2(persistent_root, structural_key, proof_key)
+    record, hit = lookup_shared_m2_reusable(
+        persistent_root,
+        structural_key,
+        proof_key,
+        source_hash=source_hash,
+    )
     owner = owner_id or Path(package_root).name
+
+    if (
+        record
+        and record.get('registry_state') == STATE_COMPLETE
+        and hit == 'structural_source_fallback'
+    ):
+        # Alias pre-token registrations under the shared notebook token proof key.
+        record = register_shared_m2_from_run(
+            persistent_root,
+            Path(str(record['canonical_run_root'])),
+            project_root=project_root,
+            registration_mode=MODE_STRICT,
+            allow_overwrite=True,
+        )
+        hit = 'exact'
 
     if record and record.get('registry_state') == STATE_COMPLETE:
         verify_shared_m2(
-            persistent_root, structural_key, proof_key,
+            persistent_root, structural_key, record.get('proof_key') or proof_key,
             require_source_match=True,
             current_source_hash=source_hash,
             current_notebook_hash=notebook_hash,
@@ -481,6 +555,7 @@ def resolve_m2_binding(
             'registry_record_sha256': record.get('registry_record_sha256'),
             'acceptance_sha256': record.get('acceptance_sha256'),
             'verified_at': utc_now(),
+            'lookup_hit': hit,
             'certification_status': 'NOT_CERTIFIED',
         }
         return write_binding(package_root, binding)
@@ -499,6 +574,7 @@ def resolve_m2_binding(
             'acceptance_sha256': None,
             'verified_at': None,
             'registry_state': record.get('registry_state'),
+            'lookup_hit': hit,
             'certification_status': 'NOT_CERTIFIED',
         }
         return write_binding(package_root, binding)

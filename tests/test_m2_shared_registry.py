@@ -382,6 +382,54 @@ def test_shared_package_audit_verifies_as_m3_parent(tmp_path: Path) -> None:
     assert len(evidence.projector_tensors) == 64
 
 
+def test_shared_token_reuses_legacy_notebook_proof_slot(tmp_path: Path) -> None:
+    """Pre-token COMPLETE under run-notebook proof key becomes READY_SHARED."""
+    from src.m2_compatibility import SHARED_M2_NOTEBOOK_TOKEN, compute_proof_key, keys_from_run_artifacts
+    from src.m2_shared_registry import lookup_shared_m2_reusable, register_shared_m2_from_run
+
+    persist = tmp_path / 'persist'
+    run = persist / 'runs' / 'M2-SHARED-ed77fc1e-2a1706d8eb5f'
+    _fake_complete_m2(run, source_hash='src-shared')
+    # Simulate legacy registration keyed by the run notebook hash.
+    legacy = keys_from_run_artifacts(run, shared_registry=False)
+    assert legacy['notebook_hash'] == 'nb1'
+    record = register_shared_m2_from_run(persist, run, registration_mode=MODE_STRICT)
+    # Force-move record under legacy proof key path (pre-token layout).
+    legacy_dir = (
+        persist / 'shared_m2_registry' / record['structural_key'] / 'proofs' / legacy['proof_key']
+    )
+    current_dir = (
+        persist / 'shared_m2_registry' / record['structural_key'] / 'proofs' / record['proof_key']
+    )
+    if current_dir != legacy_dir and current_dir.is_dir():
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        (legacy_dir / 'canonical_run.json').write_text(
+            (current_dir / 'canonical_run.json').read_text(encoding='utf-8'),
+            encoding='utf-8',
+        )
+        # Rewrite proof_key field inside legacy record.
+        payload = json.loads((legacy_dir / 'canonical_run.json').read_text(encoding='utf-8'))
+        payload['proof_key'] = legacy['proof_key']
+        payload['notebook_hash'] = 'nb1'
+        atomic_write_json(legacy_dir / 'canonical_run.json', payload)
+        for child in current_dir.iterdir():
+            child.unlink()
+        current_dir.rmdir()
+
+    shared = keys_from_run_artifacts(run, shared_registry=True)
+    assert shared['notebook_hash'] == SHARED_M2_NOTEBOOK_TOKEN
+    assert shared['proof_key'] != legacy['proof_key']
+    found, hit = lookup_shared_m2_reusable(
+        persist,
+        shared['structural_key'],
+        shared['proof_key'],
+        source_hash='src-shared',
+    )
+    assert found is not None
+    assert hit == 'structural_source_fallback'
+    assert found['canonical_run_id'] == run.name
+
+
 def test_package_audits_do_not_clobber(tmp_path: Path) -> None:
     persist = tmp_path / 'persist'
     run = persist / 'runs' / 'M2-shared'

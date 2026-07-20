@@ -1,7 +1,11 @@
 """Two-level M2 compatibility keys: structural vs proof.
 
 Structural key: same mathematical M2 problem across candidates.
-Proof key: same acceptance artifact (schema + source + notebook).
+Proof key: same acceptance artifact (schema + source + shared notebook token).
+
+Campaign C shared M2 uses SHARED_M2_NOTEBOOK_TOKEN in the proof key so that
+candidates resolve to the same registry slot. The run's actual notebook hash is
+provenance only and must not fragment the shared registry.
 
 Do NOT mix source_hash into the structural key. Do NOT reuse across
 proof keys with allow_code_drift.
@@ -25,6 +29,8 @@ class M2CompatibilityError(RuntimeError):
 SECTOR_ENUMERATION_SCHEMA = 'M2_LINK_STAR_SECTORS_V1'
 DEFAULT_PROOF_SCHEMA = 'M2_PROOF_SCHEMA_V2'
 DEFAULT_PROOF_METHOD = 'invariant_subspace_uniqueness_v1'
+# Fixed token for shared-registry proof keys (not a per-notebook digest).
+SHARED_M2_NOTEBOOK_TOKEN = 'shared-m2-v1'
 
 
 def accepted_m1_identity_sha256(
@@ -202,17 +208,26 @@ def keys_from_run_artifacts(
     run_root: Path,
     *,
     project_root: Path | None = None,
+    shared_registry: bool = True,
 ) -> dict[str, Any]:
-    """Derive structural+proof keys from a completed M2 run."""
+    """Derive structural+proof keys from a completed M2 run.
+
+    When shared_registry=True (default), proof_key uses SHARED_M2_NOTEBOOK_TOKEN
+    so Campaign C candidates share one registry slot for the same source tree.
+    The run's actual notebook_hash is returned as run_notebook_hash (provenance).
+    """
     run_root = Path(run_root)
     config = read_json(run_root / 'run_config.json')
     manifest = read_json(run_root / 'run_manifest.json')
     if not isinstance(config, dict) or not isinstance(manifest, dict):
         raise M2CompatibilityError('run_config/manifest missing')
     source_hash = str(manifest.get('source_hash') or '')
-    notebook_hash = str(manifest.get('notebook_hash') or '')
-    if not source_hash or not notebook_hash:
+    run_notebook_hash = str(manifest.get('notebook_hash') or '')
+    if not source_hash or not run_notebook_hash:
         raise M2CompatibilityError('manifest missing source_hash/notebook_hash')
+    notebook_hash = (
+        SHARED_M2_NOTEBOOK_TOKEN if shared_registry else run_notebook_hash
+    )
 
     if project_root is not None:
         m1 = accepted_m1_identity_from_audit(project_root)
@@ -253,6 +268,7 @@ def keys_from_run_artifacts(
         'proof_key': proof_key,
         'source_hash': source_hash,
         'notebook_hash': notebook_hash,
+        'run_notebook_hash': run_notebook_hash,
         'shared_run_id': shared_run_id_for_keys(structural_key, proof_key),
         'j2_max': j2_max,
     }
