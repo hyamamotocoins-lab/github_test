@@ -137,6 +137,8 @@ class M6Orchestrator:
                 z_min=z_min,
                 residual_budget=residual_budget,
                 parent_package_hash=parent_ref,
+                j2_max=self.config.j2_max,
+                bond_dimension=self.config.bond_dimension,
             )
             for index in range(self.config.num_steps)
         ]

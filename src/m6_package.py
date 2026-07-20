@@ -273,6 +273,8 @@ def make_singleton_step(
     z_min: Any,
     residual_budget: Fraction,
     parent_package_hash: str,
+    j2_max: int = 1,
+    bond_dimension: int = 16,
 ) -> dict[str, Any]:
     """Family inclusion for the singleton ball {T} with radius 0."""
     return {
@@ -281,8 +283,8 @@ def make_singleton_step(
             'step_index': step_index,
             'input_ball': 'singleton',
             'input_radius': '0',
-            'j2_max': 1,
-            'bond_dimension': int(config.get('bond_dimension', 16)),
+            'j2_max': int(j2_max),
+            'bond_dimension': int(bond_dimension),
         },
         'tensors_hashes.json': {
             'parent_one_step_package_hash_ref': parent_package_hash,
