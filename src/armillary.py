@@ -1,3 +1,5 @@
+"""Armillary CG fusion basis with invariant-subspace uniqueness certificates."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,8 +11,10 @@ from sympy import Matrix, eye, simplify, zeros
 
 from .dense_reference import matrix_hash, matrix_to_float64
 from .fusion import (
-    fusion_basis_matrix, magnetic_basis, orientation_map, representation_dimension,
+    fusion_basis_matrix, orientation_map, representation_dimension,
 )
+from .generator_action import exact_generator_annihilation
+from .su2_multiplicity import singlet_multiplicity
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -39,8 +43,9 @@ class ArmillarySector:
     fusion_paths: tuple[tuple[int, ...], ...]
     basis_map: Matrix
     armillary_tensor: Matrix
-    reconstructed_dense: Matrix
     isometry_exact: bool
+    generator_residual_exact: bool
+    independent_singlet_multiplicity: int
 
     @property
     def singlet_rank(self) -> int:
@@ -49,20 +54,32 @@ class ArmillarySector:
 
 def build_armillary_sector(key: SectorKey) -> ArmillarySector:
     paths, outgoing_basis = fusion_basis_matrix(key.representations)
-    dual_map = orientation_map(key.representations, key.orientations)
-    basis_map = (dual_map.T * outgoing_basis).applyfunc(simplify)
+    mu = singlet_multiplicity(key.representations)
     rank = len(paths)
+    if rank != mu:
+        raise ArithmeticError(
+            f'Armillary column count {rank} != independent multiplicity {mu} '
+            f'for reps={list(key.representations)}.',
+        )
+    # Generator annihilation in the outgoing magnetic basis is equivalent to
+    # physical-basis annihilation because the orientation/duality map is orthogonal.
+    residual_exact = exact_generator_annihilation(outgoing_basis, key.representations)
+    if not residual_exact:
+        raise ArithmeticError(
+            f'Armillary basis fails exact generator annihilation for reps={list(key.representations)}.',
+        )
+    dual_map = orientation_map(key.representations, key.orientations)
+    if rank:
+        basis_map = (dual_map.T * outgoing_basis).applyfunc(simplify)
+    else:
+        dimension = representation_dimension(key.representations)
+        basis_map = zeros(dimension, 0)
     armillary_tensor = eye(rank)
-    dimension = representation_dimension(key.representations)
-    reconstructed = (
-        basis_map * armillary_tensor * basis_map.T
-        if rank else zeros(dimension)
-    ).applyfunc(simplify)
     isometry = (basis_map.T * basis_map).applyfunc(simplify) == eye(rank)
     if not isometry:
         raise ArithmeticError('Armillary basis map is not exactly isometric.')
     return ArmillarySector(
-        key, paths, basis_map, armillary_tensor, reconstructed, isometry,
+        key, paths, basis_map, armillary_tensor, isometry, residual_exact, mu,
     )
 
 
@@ -82,23 +99,30 @@ def all_link_star_keys(j2_max: int = 1) -> tuple[SectorKey, ...]:
 
 def sector_summary(sector: ArmillarySector) -> dict[str, object]:
     return {
-        'representations': list(sector.key.representations),
+        'reps': list(sector.key.representations),
         'orientations': list(sector.key.orientations),
         'fusion_tree': sector.key.fusion_tree,
         'fusion_paths': [list(path) for path in sector.fusion_paths],
         'dense_dimension': representation_dimension(sector.key.representations),
         'singlet_rank': sector.singlet_rank,
+        'independent_singlet_multiplicity': sector.independent_singlet_multiplicity,
         'basis_map_hash': matrix_hash(sector.basis_map),
-        'reconstructed_dense_hash': matrix_hash(sector.reconstructed_dense),
         'isometry_exact': sector.isometry_exact,
+        'generator_residual_exact': sector.generator_residual_exact,
     }
 
 
 def checkpoint_tensor_shards(
     sectors: Iterable[ArmillarySector],
 ) -> dict[str, np.ndarray]:
+    """Diagnostic float64 Haar projectors P ≈ B Bᵀ (not a certification bound)."""
     tensors: dict[str, np.ndarray] = {}
     for sector in sectors:
         label = ''.join(str(value) for value in sector.key.representations)
-        tensors[f'projector_{label}'] = matrix_to_float64(sector.reconstructed_dense)
+        if sector.singlet_rank == 0:
+            dim = representation_dimension(sector.key.representations)
+            tensors[f'projector_{label}'] = np.zeros((dim, dim), dtype=np.float64)
+            continue
+        basis = matrix_to_float64(sector.basis_map)
+        tensors[f'projector_{label}'] = basis @ basis.T
     return tensors

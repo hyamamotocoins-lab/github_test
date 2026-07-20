@@ -97,7 +97,11 @@ def make_synthetic_accepted_m2(
         'heuristic_results': [], 'proof_artifact_hashes': phase_hashes,
         'results': {
             'M2_EQUIVALENCE': {
-                'result': {'exact_match_count': 64, 'mismatches': []},
+                'result': {
+                    'exact_match_count': 64,
+                    'mismatches': [],
+                    'comparison': 'exact invariant-subspace uniqueness certificate',
+                },
             },
         },
     })

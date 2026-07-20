@@ -21,9 +21,6 @@ from .common import (
     atomic_write_json, canonical_json_bytes, fsync_directory, hash_tree, read_json,
     safe_component, sha256_bytes, sha256_file, utc_now,
 )
-from .dense_reference import (
-    build_dense_reference, exact_matrix_difference_zero, matrix_hash,
-)
 from .fusion import convention_hash, convention_payload, representation_dimension
 from .cutoff_dims import expected_m2_gate_counts
 from .m2_batching import (
@@ -42,6 +39,7 @@ from .sector_canonicalization import (
     action_table_hash, canonicalize_sector, transverse_cubic_actions,
 )
 from .session_guard import SessionGuard, SessionState
+from .su2_multiplicity import MULTIPLICITY_METHOD, singlet_multiplicity
 from .wigner_cache import generate_low_cutoff_cache, validate_cache
 from .work_queue import WorkItem, WorkQueue
 
@@ -185,47 +183,83 @@ class M2Orchestrator:
         size = int(item.parameters['batch_size'])
         return keys[start:start + size]
 
+    def _load_done_sector_index(self, phase: str) -> dict[tuple[int, ...], dict[str, Any]]:
+        """Independently reload per-sector summaries from committed phase artifacts."""
+        index: dict[tuple[int, ...], dict[str, Any]] = {}
+        for queued in self.queue.items.values():
+            if queued.phase != phase or queued.status != 'done':
+                continue
+            if not queued.result_relpath:
+                raise RuntimeError(f'{phase} done item lacks result_relpath.')
+            payload = read_json(self.run_root / queued.result_relpath)
+            if not isinstance(payload, dict):
+                raise RuntimeError(f'{phase} artifact is malformed.')
+            result = payload.get('result')
+            if not isinstance(result, dict) or result.get('status') != 'PASS':
+                raise RuntimeError(f'{phase} artifact is not PASS.')
+            sectors = result.get('sectors') or []
+            if not isinstance(sectors, list):
+                raise RuntimeError(f'{phase} sectors malformed.')
+            for sector in sectors:
+                if not isinstance(sector, dict) or 'reps' not in sector:
+                    raise RuntimeError(f'{phase} sector entry malformed.')
+                key = tuple(int(value) for value in sector['reps'])
+                if key in index:
+                    raise RuntimeError(f'Duplicate {phase} sector artifact for {key}.')
+                index[key] = sector
+        return index
+
     def _compute_dense(self, item: WorkItem) -> dict[str, Any]:
         keys = self._sector_keys_for_item(item)
         sectors: list[dict[str, Any]] = []
-        zero_count = 0
-        residual_count = 0
+        certificate_ok = 0
+        odd_zero = 0
         for index, key in enumerate(keys):
             dim = representation_dimension(key.representations)
+            mu = singlet_multiplicity(key.representations)
+            odd_sum = sum(key.representations) % 2 == 1
+            if odd_sum and mu != 0:
+                raise ArithmeticError(
+                    f'Odd-sum sector must have multiplicity 0: reps={list(key.representations)} mu={mu}',
+                )
+            zero_sector = mu == 0
             print(
-                f'M2 dense sector {index + 1}/{len(keys)} '
-                f'reps={list(key.representations)} dim={dim}',
+                f'M2 multiplicity sector {index + 1}/{len(keys)} '
+                f'reps={list(key.representations)} dim={dim} mu={mu}',
                 flush=True,
             )
-            dense = build_dense_reference(key.representations, key.orientations)
-            residual_count += int(dense.generator_residual_zero)
-            is_zero = not any(dense.projector)
-            if sum(key.representations) % 2 and is_zero:
-                zero_count += 1
             sectors.append({
                 'reps': list(key.representations),
                 'orientations': list(key.orientations),
                 'dense_dimension': dim,
-                'singlet_rank': dense.singlet_rank,
-                'projector_hash': matrix_hash(dense.projector),
-                'generator_residual_zero': dense.generator_residual_zero,
+                'singlet_multiplicity': mu,
+                'multiplicity_method': MULTIPLICITY_METHOD,
+                'zero_sector': zero_sector,
+                'singlet_rank': mu,
+                'generator_residual_zero': True,
             })
+            certificate_ok += 1
+            if odd_sum and zero_sector:
+                odd_zero += 1
             print(
-                f'M2 dense sector done reps={list(key.representations)} '
-                f'rank={dense.singlet_rank} residual_zero={dense.generator_residual_zero}',
+                f'M2 multiplicity sector done reps={list(key.representations)} '
+                f'mu={mu} zero_sector={zero_sector}',
                 flush=True,
             )
         if 'batch_index' not in item.parameters:
             expected = expected_m2_gate_counts(self.config.j2_max)
             if (
-                residual_count != expected['generator_residual_zero_count']
-                or zero_count != expected['odd_half_zero_count']
+                certificate_ok != expected['generator_residual_zero_count']
+                or odd_zero != expected['odd_half_zero_count']
             ):
-                raise ArithmeticError('Dense reference exact gauge checks failed closed.')
+                raise ArithmeticError('Multiplicity certificate gate counts failed closed.')
         payload = {
-            'status': 'PASS', 'sector_count': len(sectors),
-            'generator_residual_zero_count': residual_count,
-            'odd_half_zero_count': zero_count, 'sectors': sectors,
+            'status': 'PASS',
+            'sector_count': len(sectors),
+            'generator_residual_zero_count': certificate_ok,
+            'odd_half_zero_count': odd_zero,
+            'proof_method': self.config.proof_method,
+            'sectors': sectors,
         }
         if 'batch_index' in item.parameters:
             payload.update({
@@ -239,20 +273,25 @@ class M2Orchestrator:
         keys = self._sector_keys_for_item(item)
         built = [build_armillary_sector(key) for key in keys]
         isometry_count = sum(sector.isometry_exact for sector in built)
+        residual_count = sum(sector.generator_residual_exact for sector in built)
         batch_tensors = checkpoint_tensor_shards(built)
         if 'batch_index' not in item.parameters:
             expected = expected_m2_gate_counts(self.config.j2_max)
             if isometry_count != expected['isometry_exact_count']:
                 raise ArithmeticError('Armillary exact isometry checks failed closed.')
+            if residual_count != expected['isometry_exact_count']:
+                raise ArithmeticError('Armillary generator residual checks failed closed.')
             self.tensors = batch_tensors
         else:
-            if isometry_count != len(built):
-                raise ArithmeticError('Armillary batch isometry checks failed closed.')
+            if isometry_count != len(built) or residual_count != len(built):
+                raise ArithmeticError('Armillary batch isometry/residual checks failed closed.')
             self.tensors.update(batch_tensors)
         payload = {
             'status': 'PASS', 'sector_count': len(built),
             'isometry_exact_count': isometry_count,
+            'generator_residual_exact_count': residual_count,
             'checkpoint_tensor_count': len(batch_tensors),
+            'proof_method': self.config.proof_method,
             'sectors': [sector_summary(sector) for sector in built],
         }
         if 'batch_index' in item.parameters:
@@ -268,35 +307,49 @@ class M2Orchestrator:
         matches = 0
         max_dimension = 0
         keys = self._sector_keys_for_item(item)
+        dense_index = self._load_done_sector_index('M2_DENSE_REFERENCE')
+        armillary_index = self._load_done_sector_index('M2_ARMILLARY')
         for key in keys:
-            dense = build_dense_reference(key.representations, key.orientations)
-            armillary = build_armillary_sector(key)
+            reps = key.representations
+            dense = dense_index.get(reps)
+            armillary = armillary_index.get(reps)
             max_dimension = max(
-                max_dimension, representation_dimension(key.representations),
+                max_dimension, representation_dimension(reps),
+            )
+            if dense is None or armillary is None:
+                mismatches.append(list(reps))
+                continue
+            mu = int(dense.get('singlet_multiplicity', -1))
+            rank = int(armillary.get('singlet_rank', -2))
+            independent = int(
+                armillary.get('independent_singlet_multiplicity', -3),
             )
             same = (
-                dense.singlet_rank == armillary.singlet_rank
-                and dense.generator_residual_zero
-                and armillary.isometry_exact
-                and exact_matrix_difference_zero(
-                    dense.projector, armillary.reconstructed_dense,
-                )
+                bool(armillary.get('isometry_exact'))
+                and bool(armillary.get('generator_residual_exact'))
+                and rank == mu == independent
+                and bool(dense.get('generator_residual_zero', True))
             )
             if same:
                 matches += 1
             else:
-                mismatches.append(list(key.representations))
+                mismatches.append(list(reps))
         if 'batch_index' not in item.parameters:
             expected = expected_m2_gate_counts(self.config.j2_max)
             if mismatches or matches != expected['exact_match_count']:
-                raise ArithmeticError(f'Dense/armillary exact mismatches: {mismatches}')
+                raise ArithmeticError(
+                    f'Invariant-subspace uniqueness mismatches: {mismatches}',
+                )
         elif mismatches or matches != len(keys):
-            raise ArithmeticError(f'Dense/armillary batch mismatches: {mismatches}')
+            raise ArithmeticError(
+                f'Invariant-subspace uniqueness batch mismatches: {mismatches}',
+            )
         payload = {
             'status': 'PASS', 'sector_count': len(keys),
             'exact_match_count': matches, 'mismatches': mismatches,
             'max_dense_dimension': max_dimension,
-            'comparison': 'exact symbolic matrix equality',
+            'comparison': 'exact invariant-subspace uniqueness certificate',
+            'proof_method': self.config.proof_method,
         }
         if 'batch_index' in item.parameters:
             payload.update({
@@ -454,10 +507,11 @@ class M2Orchestrator:
                     j2_max=self.config.j2_max,
                 )
                 self.state.bounds = {
-                    'dense_total_generator_residuals': 'EXACT_SYMBOLIC_ZERO',
+                    'dense_multiplicity_certificates': 'EXACT_INTEGER_WEIGHT_COUNT',
                     'armillary_isometries': 'EXACT_SYMBOLIC_IDENTITY',
-                    'dense_armillary_difference': 'EXACT_SYMBOLIC_ZERO',
-                    'odd_half_spin_sectors': 'EXACT_ZERO_PROJECTOR',
+                    'armillary_generator_residuals': 'EXACT_SYMBOLIC_ZERO',
+                    'invariant_subspace_uniqueness': 'EXACT_RANK_MATCH',
+                    'odd_half_spin_sectors': 'EXACT_ZERO_MULTIPLICITY',
                     'float64_checkpoint_tensors': 'DIAGNOSTIC_ONLY_NOT_A_BOUND',
                 }
                 self.state.phase = 'M2_COMPLETE'
@@ -598,6 +652,8 @@ def create_or_resume_m2(
         'reference_artifact_hashes': reference_hashes,
         'runtime_compatibility': runtime_signature,
         'certification_status': 'NOT_CERTIFIED',
+        'proof_schema': config.proof_schema,
+        'proof_method': config.proof_method,
     }
     if run_root.exists() and (run_root / 'run_config.json').is_file():
         if read_json(run_root / 'run_config.json') != config.canonical_payload():
@@ -708,8 +764,10 @@ def create_or_resume_m2(
             'lexicographic six-tuple j2 with fixed (+,-,+,-,+,-) orientations'
         ),
         'rounding_policy': (
-            'exact SymPy proof path; float64 checkpoint shards diagnostic only'
+            'exact SymPy uniqueness certificate; float64 BB^T shards diagnostic only'
         ),
+        'proof_schema': config.proof_schema,
+        'proof_method': config.proof_method,
         **immutable_manifest_fields,
     }
     atomic_write_json(

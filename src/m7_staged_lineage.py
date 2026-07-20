@@ -154,6 +154,13 @@ def run_staged_m2_session(
             payload = read_json(existing_config)
             if not isinstance(payload, dict):
                 raise M7StagedLineageError('Existing M2 run_config.json malformed.')
+            if payload.get('proof_schema') != 'M2_PROOF_SCHEMA_V2':
+                raise M7StagedLineageError(
+                    f'Existing M2 run {run_id} uses proof schema '
+                    f"{payload.get('proof_schema')!r}; "
+                    'allocate a new child M2 run ID for M2_PROOF_SCHEMA_V2 '
+                    '(invariant_subspace_uniqueness_v1).'
+                )
             if 'orientations' in payload and isinstance(payload['orientations'], list):
                 payload = {
                     **payload,

@@ -10,7 +10,9 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class M2Config:
-    schema_version: int = 1
+    schema_version: int = 2
+    proof_schema: str = 'M2_PROOF_SCHEMA_V2'
+    proof_method: str = 'invariant_subspace_uniqueness_v1'
     project_name: str = 'validated_4d_su2_rg'
     milestone: str = 'M2'
     parent_milestone: str = 'M1'
@@ -49,11 +51,19 @@ class M2Config:
 
     def __post_init__(self) -> None:
         if (
-            self.schema_version != 1
+            self.schema_version != 2
             or self.project_name != 'validated_4d_su2_rg'
             or self.milestone != 'M2'
         ):
             raise ValueError('Unsupported M2 project/config schema.')
+        if (
+            self.proof_schema != 'M2_PROOF_SCHEMA_V2'
+            or self.proof_method != 'invariant_subspace_uniqueness_v1'
+        ):
+            raise ValueError(
+                'M2 proof schema must be M2_PROOF_SCHEMA_V2 / '
+                'invariant_subspace_uniqueness_v1.',
+            )
         if self.parent_milestone != 'M1' or self.certification_status != 'NOT_CERTIFIED':
             raise ValueError('M2 parent/status invariant failed.')
         if not self.parent_run_id or self.parent_checkpoint != 'ckpt_000014':

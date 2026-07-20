@@ -239,6 +239,11 @@ def verify_accepted_m2_parent(
     if (
         equivalence.get('exact_match_count') != expected_counts['exact_match_count']
         or equivalence.get('mismatches') != []
+        or equivalence.get('comparison') not in {
+            'exact invariant-subspace uniqueness certificate',
+            # Legacy accepted parents may still carry the v1 comparison string.
+            'exact symbolic matrix equality',
+        }
     ):
         raise M3ParentError('Accepted M2 exact equivalence result changed.')
 

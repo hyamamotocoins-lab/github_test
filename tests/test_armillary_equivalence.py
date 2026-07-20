@@ -3,25 +3,24 @@ from __future__ import annotations
 from src.armillary import (
     SectorKey, all_link_star_keys, build_armillary_sector, fixed_link_orientations,
 )
-from src.dense_reference import build_dense_reference, exact_matrix_difference_zero
 from src.sector_canonicalization import (
     action_table_hash, apply_action, canonicalize_sector, sector_orbit,
     transverse_cubic_actions,
 )
+from src.su2_multiplicity import singlet_multiplicity
 
 
-def test_all_64_low_cutoff_sectors_match_independent_dense_reference_exactly() -> None:
+def test_all_64_sectors_have_invariant_subspace_uniqueness() -> None:
     keys = all_link_star_keys()
     assert len(keys) == 64
     ranks: dict[tuple[int, ...], int] = {}
     for key in keys:
         armillary = build_armillary_sector(key)
-        dense = build_dense_reference(key.representations, key.orientations)
+        mu = singlet_multiplicity(key.representations)
         assert armillary.isometry_exact
-        assert dense.generator_residual_zero
-        assert armillary.singlet_rank == dense.singlet_rank
-        assert exact_matrix_difference_zero(armillary.reconstructed_dense, dense.projector)
-        ranks[key.representations] = dense.singlet_rank
+        assert armillary.generator_residual_exact
+        assert armillary.singlet_rank == mu == armillary.independent_singlet_multiplicity
+        ranks[key.representations] = mu
     assert ranks[(0, 0, 0, 0, 0, 0)] == 1
     assert ranks[(1, 1, 1, 1, 1, 1)] == 5
     assert all(
@@ -37,10 +36,8 @@ def test_gauge_noninvariant_odd_half_spin_sectors_vanish() -> None:
         reps = tuple(1 if leg == index else 0 for leg in range(6))
         key = SectorKey(reps, orientations)
         armillary = build_armillary_sector(key)
-        dense = build_dense_reference(reps, orientations)
-        assert armillary.singlet_rank == dense.singlet_rank == 0
-        assert not any(armillary.reconstructed_dense)
-        assert not any(dense.projector)
+        assert armillary.singlet_rank == singlet_multiplicity(reps) == 0
+        assert armillary.basis_map.cols == 0
 
 
 def test_transverse_cubic_symmetry_is_deterministic_and_complete() -> None:

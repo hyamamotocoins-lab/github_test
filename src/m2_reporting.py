@@ -167,17 +167,21 @@ def _markdown_report(report: dict[str, Any]) -> str:
         '- duality: `C|j,m> = (-1)^(j-m)|j,-m>`',
         '- normalization: orthonormal CG basis and normalized Haar projector', '',
         '## Exact checks', '',
-        f"- dense sectors with exact zero generator residual: {dense['generator_residual_zero_count']}/{n}",
-        f"- gauge-noninvariant odd-half sectors exactly zero: {dense['odd_half_zero_count']}/{odd}",
+        f"- independent singlet multiplicity certificates: {dense['generator_residual_zero_count']}/{n}",
+        f"- gauge-noninvariant odd-half sectors exactly zero multiplicity: {dense['odd_half_zero_count']}/{odd}",
         f"- armillary exact isometries: {armillary['isometry_exact_count']}/{n}",
-        f"- dense–armillary exact matrix matches: {equivalence['exact_match_count']}/{n}",
+        f"- invariant-subspace uniqueness matches: {equivalence['exact_match_count']}/{n}",
+        f"- comparison: `{equivalence.get('comparison')}`",
         f"- transverse cubic actions: {symmetry['group_order']}",
         f"- deterministic canonical sectors: {symmetry['canonical_sector_count']}", '',
-        'The dense reference is obtained from the exact simultaneous kernel of the total SU(2) generators. '
-        'The armillary representation is obtained independently from a fixed exact CG fusion basis. '
-        'Acceptance compares the resulting symbolic matrices exactly; float64 tensor shards are restart diagnostics only.', '',
+        'The independent reference is the integer magnetic-weight multiplicity μ₀ = w₀ − w₂. '
+        'The armillary representation is obtained from a fixed exact CG fusion basis B. '
+        'Acceptance verifies exact isometry BᵀB = I, exact generator annihilation JₐB = 0, '
+        'and rank(B) = μ₀, which uniquely identifies the Haar singlet subspace. '
+        'Float64 tensor shards P ≈ BBᵀ are restart diagnostics only.', '',
         '## Proven at M2', '',
-        f'- At `j2_max={j2_max}`, all {n} representation sectors of the six-leg link star have exact dense/armillary projector equality.',
+        f'- At `j2_max={j2_max}`, all {n} representation sectors of the six-leg link star have '
+        'exact invariant-subspace uniqueness certificates.',
         '- The phase, orientation, duality, fusion-tree, and normalization conventions are pinned by content hashes.',
         '- Deterministic cache regeneration, symmetry canonicalization, checkpoint fallback, and fresh-process resume pass.', '',
         '## Limitations', '',
@@ -210,6 +214,8 @@ def write_m2_report_package(
             'm1_report_sha256', 'm1_acceptance_sha256', 'm1_audit_sha256',
         )},
         'config': config.canonical_payload(), 'config_hash': config.config_hash(),
+        'proof_schema': config.proof_schema,
+        'proof_method': config.proof_method,
         'source_hash': manifest['source_hash'],
         'notebook_hash': manifest['notebook_hash'],
         'convention_hash': manifest['convention_hash'],
@@ -223,10 +229,10 @@ def write_m2_report_package(
         },
         'memory': peak_memory_report(),
         'rigorous_results': [
-            f'exact total-generator dense Haar projectors for all {n} sectors',
-            f'exact fixed-CG armillary basis maps for all {n} sectors',
-            'exact symbolic equality of every dense and reconstructed projector',
-            f'exact vanishing of all {odd} odd-half-spin sectors',
+            f'exact integer singlet multiplicity certificates for all {n} sectors',
+            f'exact fixed-CG armillary isometries and generator annihilation for all {n} sectors',
+            'exact invariant-subspace uniqueness (rank(B)=μ₀) for every sector',
+            f'exact vanishing multiplicity of all {odd} odd-half-spin sectors',
         ],
         'heuristic_results': [],
         'unresolved_issues': [

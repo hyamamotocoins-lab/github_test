@@ -199,7 +199,7 @@ def merge_m2_batch_payloads(
             'exact_match_count': matches,
             'mismatches': mismatches,
             'max_dense_dimension': max_dimension,
-            'comparison': 'exact symbolic matrix equality',
+            'comparison': 'exact invariant-subspace uniqueness certificate',
         })
     else:
         raise RuntimeError(f'Unsupported batched M2 phase: {phase}')

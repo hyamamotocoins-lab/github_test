@@ -1,13 +1,18 @@
+"""Legacy dense Haar projector construction (SymPy nullspace).
+
+M2_PROOF_SCHEMA_V2 no longer uses ``build_dense_reference`` in the live
+orchestrator path. The functions remain for regression comparisons against
+integer multiplicity and for optional diagnostics.
+"""
+
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from functools import reduce
-from operator import mul
 from typing import Iterable
 
 import numpy as np
-from sympy import Expr, Matrix, Rational, eye, kronecker_product, simplify, sqrt, srepr, zeros
+from sympy import Matrix, Rational, eye, kronecker_product, simplify, sqrt, srepr, zeros
 
 from .common import canonical_json_bytes
 from .fusion import magnetic_basis, magnetic_values, orientation_map, representation_dimension
