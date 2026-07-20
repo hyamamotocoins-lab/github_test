@@ -9,7 +9,8 @@ from enum import Enum
 from fractions import Fraction
 from typing import Any, Iterable, Mapping, Sequence
 
-from .interval_kernel import IntervalKernelError, ProofInterval, construct
+from .exact_arithmetic import fraction_decimal_text
+from .interval_kernel import ProofInterval, construct
 
 
 class ResidualValidationError(RuntimeError):
@@ -110,8 +111,8 @@ class ResidualTerm:
 
     def payload(self) -> dict[str, Any]:
         data = asdict(self)
-        data['lower'] = format(self.lower, 'f')
-        data['upper'] = format(self.upper, 'f')
+        data['lower'] = fraction_decimal_text(self.lower)
+        data['upper'] = fraction_decimal_text(self.upper)
         data['lower_fraction'] = {
             'numerator_hex': format(self.lower.numerator, 'x'),
             'denominator_hex': format(self.lower.denominator, 'x'),
@@ -141,8 +142,8 @@ class ResidualAggregate:
         return {
             'aggregate_id': self.aggregate_id,
             'term_ids': list(self.term_ids),
-            'lower': format(self.lower, 'f'),
-            'upper': format(self.upper, 'f'),
+            'lower': fraction_decimal_text(self.lower),
+            'upper': fraction_decimal_text(self.upper),
             'rigour_status': self.rigour_status.value,
             'formula_id': self.formula_id,
         }

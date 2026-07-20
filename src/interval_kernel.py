@@ -12,7 +12,13 @@ from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from typing import Any, Iterable, Sequence
 
-from .exact_arithmetic import ExactArithmeticError, RationalInterval, fraction_from_payload, fraction_payload
+from .exact_arithmetic import (
+    ExactArithmeticError,
+    RationalInterval,
+    fraction_decimal_text,
+    fraction_from_payload,
+    fraction_payload,
+)
 
 
 class IntervalKernelError(ExactArithmeticError):
@@ -244,8 +250,8 @@ class ProofInterval:
             'arithmetic_backend': self.arithmetic_backend,
             'precision_bits': self.precision_bits,
             'rounding_policy': self.rounding_policy,
-            'decimal_lo': format(self.lo, 'f'),
-            'decimal_hi': format(self.hi, 'f'),
+            'decimal_lo': fraction_decimal_text(self.lo),
+            'decimal_hi': fraction_decimal_text(self.hi),
         }
 
     @classmethod

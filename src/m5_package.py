@@ -7,23 +7,21 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .certificate import (
-    CollatzBound,
-    PositiveRationalVector,
     collatz_certificate,
     nonnegative_interval_matrix,
     positive_rational_vector,
 )
-from .common import atomic_write_json, atomic_write_text, hash_tree, sha256_file
+from .common import atomic_write_json, atomic_write_text, hash_tree
+from .exact_arithmetic import fraction_decimal_text
 from .independent_one_step_verifier import verify_one_step_package
 from .influence import InfluenceEntry, assemble_influence_matrix
-from .interval_kernel import ProofInterval, construct
+from .interval_kernel import construct
+from .m5_status import M5_COMPLETE, NOT_CERTIFIED, ONE_STEP_CERTIFIED
 from .proof_manifest import (
     ONE_STEP_CERTIFICATE_FILES,
     ProofDependency,
     verify_immutable_package,
-    write_certificate_manifest,
 )
-from .m5_status import M5_COMPLETE, NOT_CERTIFIED, ONE_STEP_CERTIFIED
 
 
 class M5PackageError(RuntimeError):
@@ -185,11 +183,13 @@ def assemble_one_step_package(
         'phase': phase,
         'milestone_status': milestone_status,
         'certification_status': certification_status,
-        'q_collatz_upper': format(bound.q_collatz.hi, 'f'),
-        'outside_matrix_tail_upper': format(bound.outside_matrix_tail.hi, 'f'),
-        'q_cert_upper': format(bound.q_cert.hi, 'f'),
-        'q_cert_lower': format(bound.q_cert.lo, 'f'),
-        'margin_lower': format(bound.margin.lo, 'f'),
+        'q_collatz_upper': fraction_decimal_text(bound.q_collatz.hi),
+        'outside_matrix_tail_upper': fraction_decimal_text(
+            bound.outside_matrix_tail.hi
+        ),
+        'q_cert_upper': fraction_decimal_text(bound.q_cert.hi),
+        'q_cert_lower': fraction_decimal_text(bound.q_cert.lo),
+        'margin_lower': fraction_decimal_text(bound.margin.lo),
         'proof_obligations': obligations,
         'independent_verifier': 'PENDING',
     }
@@ -197,8 +197,8 @@ def assemble_one_step_package(
         verdict['failure_gate'] = 'P11'
         verdict['failure_reason'] = 'verified q_cert_lower >= 1'
         verdict['q_cert_interval'] = [
-            format(bound.q_cert.lo, 'f'),
-            format(bound.q_cert.hi, 'f'),
+            fraction_decimal_text(bound.q_cert.lo),
+            fraction_decimal_text(bound.q_cert.hi),
         ]
     _write_json(package_root, 'verdict.json', verdict)
     verify_immutable_package(package_root, dependencies=dependencies)

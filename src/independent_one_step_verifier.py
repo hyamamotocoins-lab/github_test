@@ -13,7 +13,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from .common import canonical_json_bytes, read_json, sha256_bytes, sha256_file
+from .common import canonical_json_bytes, read_json, sha256_file
+from .exact_arithmetic import fraction_decimal_text
 from .proof_manifest import (
     ONE_STEP_CERTIFICATE_FILES,
     ProofManifestError,
@@ -154,11 +155,15 @@ def _recompute_collatz(package: Path) -> dict[str, Any]:
         raise IndependentVerifierError('Independent q_cert disagrees with package.')
     return {
         'recomputed_collatz_rows': [
-            {'lo': format(q[0], 'f'), 'hi': format(q[1], 'f')} for q in quotients
+            {
+                'lo': fraction_decimal_text(q[0]),
+                'hi': fraction_decimal_text(q[1]),
+            }
+            for q in quotients
         ],
         'recomputed_q_cert': {
-            'lo': format(q_cert[0], 'f'),
-            'hi': format(q_cert[1], 'f'),
+            'lo': fraction_decimal_text(q_cert[0]),
+            'hi': fraction_decimal_text(q_cert[1]),
             'lower_fraction': {
                 'numerator_hex': format(q_cert[0].numerator, 'x'),
                 'denominator_hex': format(q_cert[0].denominator, 'x'),
@@ -245,7 +250,10 @@ def verify_one_step_package(
             'row_type': entry['row_type'],
             'column_type': entry['column_type'],
             'displacement': entry['displacement'],
-            'influence_upper': {'lo': format(lo, 'f'), 'hi': format(hi, 'f')},
+            'influence_upper': {
+                'lo': fraction_decimal_text(lo),
+                'hi': fraction_decimal_text(hi),
+            },
         })
 
     weighted = influence_doc.get('weighted_matrix')
@@ -291,8 +299,8 @@ def verify_one_step_package(
         package_manifest_hash=manifest['package_manifest_hash'],
         recomputed_artifact_hashes=manifest['file_hashes'],
         recomputed_normalization={
-            'z_min_lower': format(zmin[0], 'f'),
-            'z_min_upper': format(zmin[1], 'f'),
+            'z_min_lower': fraction_decimal_text(zmin[0]),
+            'z_min_upper': fraction_decimal_text(zmin[1]),
         },
         recomputed_influence_entries=recomputed_entries,
         recomputed_weighted_matrix={

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any, Sequence
 
+from .exact_arithmetic import fraction_decimal_text
 from .interval_kernel import (
     IntervalKernelError,
     ProofInterval,
@@ -43,7 +44,7 @@ class PositiveRationalVector:
                 {
                     'numerator_hex': format(value.numerator, 'x'),
                     'denominator_hex': format(value.denominator, 'x'),
-                    'decimal': format(value, 'f'),
+                    'decimal': fraction_decimal_text(value),
                 }
                 for value in self.components
             ],
@@ -94,11 +95,13 @@ class CollatzBound:
             'outside_matrix_tail': self.outside_matrix_tail.serialize(),
             'q_cert': self.q_cert.serialize(),
             'margin': self.margin.serialize(),
-            'q_collatz_upper': format(self.q_collatz.hi, 'f'),
-            'outside_matrix_tail_upper': format(self.outside_matrix_tail.hi, 'f'),
-            'q_cert_upper': format(self.q_cert.hi, 'f'),
-            'q_cert_lower': format(self.q_cert.lo, 'f'),
-            'margin_lower': format(self.margin.lo, 'f'),
+            'q_collatz_upper': fraction_decimal_text(self.q_collatz.hi),
+            'outside_matrix_tail_upper': fraction_decimal_text(
+                self.outside_matrix_tail.hi
+            ),
+            'q_cert_upper': fraction_decimal_text(self.q_cert.hi),
+            'q_cert_lower': fraction_decimal_text(self.q_cert.lo),
+            'margin_lower': fraction_decimal_text(self.margin.lo),
             'verdict': self.verdict,
         }
 

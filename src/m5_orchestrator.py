@@ -17,6 +17,7 @@ from .common import (
     sha256_file,
     utc_now,
 )
+from .exact_arithmetic import fraction_decimal_text
 from .interval_kernel import construct
 from .m5_config import M5Config, default_m5_config
 from .m5_package import (
@@ -246,8 +247,8 @@ class M5Orchestrator:
             normalization_bounds={
                 'status': 'PASS',
                 'z_min_interval': zmin.serialize(),
-                'z_min_lower': format(zmin.lo, 'f'),
-                'z_min_upper': format(zmin.hi, 'f'),
+                'z_min_lower': fraction_decimal_text(zmin.lo),
+                'z_min_upper': fraction_decimal_text(zmin.hi),
                 'kernel_positivity_evidence': 'fixture_nonnegative_kernel',
                 'kernel_l1_error': '0',
             },

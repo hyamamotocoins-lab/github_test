@@ -50,6 +50,17 @@ def outward_decimal(value: Fraction, places: int, upper: bool) -> str:
         return str(quotient.quantize(unit, rounding=rounding))
 
 
+def fraction_decimal_text(value: Fraction) -> str:
+    """Render a Fraction as a plain decimal string without Fraction.__format__.
+
+    Python 3.11 and earlier reject format(Fraction, 'f'); Paperspace uses 3.11.
+    """
+    _require_fraction(value, 'value')
+    with localcontext() as context:
+        context.prec = max(50, value.denominator.bit_length() + 16)
+        return format(Decimal(value.numerator) / Decimal(value.denominator), 'f')
+
+
 @dataclass(frozen=True, slots=True)
 class RationalInterval:
     lo: Fraction
