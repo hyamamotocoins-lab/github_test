@@ -525,16 +525,26 @@ def run_pre_m6_batch(
                 )
             )
         except Exception as exc:  # noqa: BLE001
+            msg = f'{type(exc).__name__}: {exc}'
+            if 'does not converge' in msg or 'regression' in msg.lower():
+                status = 'M5_BLOCKED_M4_REGRESSION'
+            elif 'M4' in msg and 'M5' not in msg:
+                status = 'M4_BLOCKED'
+            else:
+                status = 'M5_BLOCKED'
             err = {
                 'package': str(package),
                 'candidate_id': row.get('candidate_id'),
-                'error': f'{type(exc).__name__}: {exc}',
+                'error': msg,
                 **screening_only_payload(),
             }
             errors.append(err)
             _write_pre_m6(package, {
-                'status': 'M4_BLOCKED' if 'M4' in str(exc) else 'M5_BLOCKED',
+                'status': status,
                 'error': err['error'],
+                'm4_complete': _m4_complete_on_disk(
+                    persistent_root, str((_child_ids(package) or {}).get('M4') or ''),
+                ),
             })
 
     summary = {

@@ -230,12 +230,17 @@ def _verify_regression(report: dict[str, Any]) -> dict[str, float]:
             actual_steps, actual_steps[1:],
             relative_errors, relative_errors[1:],
         ):
-            if later_e > earlier_e * 1.05:
+            # Align with M4 orchestrator: monotone OR all residuals already at/under
+            # finite_difference_relative_tolerance (noise-floor FP non-monotonicity).
+            all_small = all(
+                value <= float(tolerance) for value in relative_errors
+            )
+            if later_e > earlier_e * 1.05 and not all_small:
                 raise M5ParentError(f'M4 regression does not converge: {name}')
             if earlier_e <= 0.0 or later_e <= 0.0:
                 raise M5ParentError(f'M4 regression residual is nonpositive: {name}')
             if later_e >= earlier_e:
-                # Mild non-monotonicity within 5%: skip order estimate.
+                # Mild non-monotonicity within 5% (or noise floor): skip order estimate.
                 continue
             order = math.log(later_e / earlier_e) / math.log(later_h / earlier_h)
             if not math.isfinite(order):
