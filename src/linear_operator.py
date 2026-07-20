@@ -198,13 +198,16 @@ def build_armillary_operator(
     projector_tensors: Mapping[str, np.ndarray],
     backend: ContractionBackend, path_cache_path: Path,
     *, sectors_per_shard: int, weight_base: float = 0.5,
+    j2_max: int = 1,
 ) -> ArmillaryLinearOperator:
     if not 0.0 < weight_base <= 1.0:
         raise ValueError('M3 sector weight base must lie in (0,1].')
+    if not isinstance(j2_max, int) or isinstance(j2_max, bool) or j2_max < 0:
+        raise ValueError('j2_max must be a nonnegative integer.')
     blocks: list[SectorBlock] = []
     offset = 0
     expected_names: set[str] = set()
-    for key in all_link_star_keys():
+    for key in all_link_star_keys(j2_max):
         label = ''.join(str(value) for value in key.representations)
         name = f'projector_{label}'
         expected_names.add(name)

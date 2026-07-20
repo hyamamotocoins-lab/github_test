@@ -162,6 +162,7 @@ class M3Orchestrator:
             sectors_per_shard=(
                 sectors_per_shard or self.config.initial_sector_shard_size
             ),
+            j2_max=self.config.j2_max,
         )
 
     def _next_pending(self) -> WorkItem | None:
