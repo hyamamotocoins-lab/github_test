@@ -229,8 +229,9 @@ def next_actionable_candidate(
         candidates.append(row)
     if not candidates:
         return None
-    # Prefer already M2-ready, then materialized, then lowest estimated q.
+    # Prefer staged (j2>=2), then already M2-ready, then materialized, then lowest q.
     candidates.sort(key=lambda row: (
+        0 if row.get('staged_executable') else 1,
         0 if row.get('m2_ready') else 1,
         0 if row.get('materialized') else 1,
         float(row.get('estimated_q') or 1e9),

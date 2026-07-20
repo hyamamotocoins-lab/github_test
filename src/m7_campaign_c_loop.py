@@ -90,11 +90,12 @@ def run_campaign_c_queue_s0_loop(
     sweep_config: dict[str, Any] | None = None,
     max_executable_j2_max: int = 2,
     max_staged_j2_max: int = 2,
+    staged_only: bool = True,
 ) -> dict[str, Any]:
     """Run 82-style prepare + 83-style S0 until NEED_CANONICAL_M2 (or terminal).
 
     Stop conditions:
-    - NEED_CANONICAL_M2 / WAITING_FOR_CANONICAL_M2 (go to notebook 73)
+    - NEED_CANONICAL_M2 / WAITING_FOR_CANONICAL_M2 (go to notebook 73 for j2>=2)
     - NEED_M2 from S0 gate
     - SELECTED (exploratory; notebook 78 scaffold)
     - EXHAUSTED (no actionable left)
@@ -102,6 +103,9 @@ def run_campaign_c_queue_s0_loop(
 
     Continues across ARCHIVED / NO_SELECTION.
     Never starts production M6.
+
+    staged_only=True (default): skip j2_max=1 instant candidates. Those need a
+    separate instant-live M2, not notebook 73 staged shared M2 (j2>=2).
     """
     if max_candidates < 1:
         raise CampaignCLoopError('max_candidates must be >= 1')
@@ -131,12 +135,39 @@ def run_campaign_c_queue_s0_loop(
             if (r.get('staged_executable') or r.get('instant_executable'))
             and not r.get('archived')
         ]
+        if staged_only:
+            live = [r for r in live if r.get('staged_executable')]
         nxt = next_actionable_candidate(
             search_root,
             persistent_root=persistent_root,
             max_executable_j2_max=max_executable_j2_max,
             max_staged_j2_max=max_staged_j2_max,
+            prefer_staged=True,
         )
+        if nxt is not None and staged_only and not nxt.get('staged_executable'):
+            # All remaining actionable are instant (j2=1); stop with clear routing.
+            append_series_log(search_root, {
+                'event': 'STAGED_QUEUE_EXHAUSTED_INSTANT_REMAIN',
+                'candidate_id': nxt.get('candidate_id'),
+                'j2_max': nxt.get('j2_max'),
+            })
+            return {
+                'series_status': 'STAGED_EXHAUSTED',
+                'processed': processed,
+                'candidate_id': nxt.get('candidate_id'),
+                'j2_max': nxt.get('j2_max'),
+                'events': events,
+                'queue': rows,
+                'next_notebook': None,
+                'note': (
+                    'No staged (j2_max>=2) candidates left. '
+                    f"Next instant candidate is {nxt.get('candidate_id')} "
+                    f"(j2_max={nxt.get('j2_max')}). "
+                    'Do NOT use notebook 73 (staged shared M2 is j2>=2 only). '
+                    'Either archive/skip j2=1 for now, or run instant-live M2 separately.'
+                ),
+                'generated_at': utc_now(),
+            }
         if nxt is None:
             append_series_log(search_root, {
                 'event': 'CAMPAIGN_C_LOOP_EXHAUSTED',
@@ -152,6 +183,7 @@ def run_campaign_c_queue_s0_loop(
             }
 
         candidate_id = str(nxt['candidate_id'])
+        j2_max = int(nxt.get('j2_max') or 2)
         rank_idx = next(
             (i for i, r in enumerate(live) if r['candidate_id'] == candidate_id),
             0,
@@ -169,17 +201,36 @@ def run_campaign_c_queue_s0_loop(
         )
         state = prepared.get('state')
         package_root = Path(prepared['package_root'])
-        events.append({'event': 'PREPARE', **prepared})
+        events.append({'event': 'PREPARE', **prepared, 'j2_max': j2_max})
 
         if state in _STOP_BINDING:
             append_series_log(search_root, {
                 'event': state,
                 'candidate_id': candidate_id,
+                'j2_max': j2_max,
             })
+            if j2_max <= 1:
+                return {
+                    'series_status': state,
+                    'processed': processed,
+                    'candidate_id': candidate_id,
+                    'j2_max': j2_max,
+                    'package_root': str(package_root),
+                    'binding': prepared.get('binding'),
+                    'events': events,
+                    'next_notebook': None,
+                    'note': (
+                        f'{state} for j2_max=1 candidate {candidate_id}. '
+                        'Shared M2 from Campaign C staged path is j2_max=2 only. '
+                        'Do NOT start notebook 73. Skip/archive j2=1 or use instant-live M2.'
+                    ),
+                    'generated_at': utc_now(),
+                }
             return {
                 'series_status': state,
                 'processed': processed,
                 'candidate_id': candidate_id,
+                'j2_max': j2_max,
                 'package_root': str(package_root),
                 'binding': prepared.get('binding'),
                 'events': events,
@@ -225,11 +276,28 @@ def run_campaign_c_queue_s0_loop(
             append_series_log(search_root, {
                 'event': 'NEED_M2',
                 'candidate_id': candidate_id,
+                'j2_max': j2_max,
             })
+            if j2_max <= 1:
+                return {
+                    'series_status': 'NEED_M2',
+                    'processed': processed,
+                    'candidate_id': candidate_id,
+                    'j2_max': j2_max,
+                    'package_root': str(package_root),
+                    'events': events,
+                    'next_notebook': None,
+                    'note': (
+                        'NEED_M2 for j2_max=1. Do NOT use notebook 73; '
+                        'use instant-live M2 path or skip this candidate.'
+                    ),
+                    'generated_at': utc_now(),
+                }
             return {
                 'series_status': 'NEED_M2',
                 'processed': processed,
                 'candidate_id': candidate_id,
+                'j2_max': j2_max,
                 'package_root': str(package_root),
                 'events': events,
                 'next_notebook': '73_m7_staged_s3_lineage.ipynb',
