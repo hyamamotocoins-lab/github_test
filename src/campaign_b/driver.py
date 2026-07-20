@@ -43,6 +43,7 @@ from .schemas import (
     assert_phase_allowed,
     screening_only_payload,
 )
+from .resume_pointer import write_resume_pointer
 from .screening import run_primary_screening
 from .state_machine import transition_campaign
 
@@ -83,6 +84,12 @@ def create_or_resume_manifest(cfg: CampaignBConfig) -> tuple[CampaignBConfig, di
         if not isinstance(manifest, dict):
             raise CampaignFatalError('corrupt campaign_manifest.json')
         assert_not_certified(manifest, context='resume_manifest')
+        write_resume_pointer(
+            cfg.persistent_root,
+            campaign_run_id=str(cfg.campaign_run_id),
+            campaign_root=root,
+            extra={'phase': 'resume'},
+        )
         return cfg, manifest
 
     if not cfg.campaign_run_id:
@@ -116,6 +123,12 @@ def create_or_resume_manifest(cfg: CampaignBConfig) -> tuple[CampaignBConfig, di
     import hashlib
     manifest['environment_hash'] = hashlib.sha256(env_bytes).hexdigest()
     atomic_write_json(root / 'campaign_manifest.json', manifest)
+    write_resume_pointer(
+        cfg.persistent_root,
+        campaign_run_id=str(cfg.campaign_run_id),
+        campaign_root=root,
+        extra={'phase': 'created'},
+    )
     return cfg, manifest
 
 
@@ -182,6 +195,7 @@ def run_campaign_b(config_path: Path | str) -> dict[str, Any]:
                 ledger=store.load_ledger(),
                 budget=budget,
                 terminal_reason=TERMINAL_FAIL,
+                persistent_root=cfg.persistent_root,
             )
 
         # Resume deadline if present
@@ -471,6 +485,7 @@ def run_campaign_b(config_path: Path | str) -> dict[str, Any]:
             ledger=ledger,
             budget=budget,
             terminal_reason=TERMINAL_FAIL,
+            persistent_root=cfg.persistent_root,
         )
 
     ledger = store.load_ledger()
@@ -484,6 +499,7 @@ def run_campaign_b(config_path: Path | str) -> dict[str, Any]:
         ledger=ledger,
         budget=budget,
         terminal_reason=ledger.get('terminal_reason'),
+        persistent_root=cfg.persistent_root,
     )
 
 

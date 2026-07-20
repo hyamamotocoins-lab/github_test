@@ -7,6 +7,7 @@ from typing import Any
 
 from ..common import atomic_write_json, sha256_file, utc_now
 from .budget import BudgetManager
+from .resume_pointer import write_resume_pointer
 from .schemas import screening_only_payload
 
 
@@ -18,12 +19,27 @@ def finalize_campaign(
     ledger: dict[str, Any],
     budget: BudgetManager,
     terminal_reason: str | None,
+    persistent_root: Path | None = None,
 ) -> dict[str, Any]:
     root = Path(campaign_root)
     root.mkdir(parents=True, exist_ok=True)
+    run_id = str(manifest.get('campaign_run_id') or '')
+    persist = Path(
+        persistent_root
+        or manifest.get('persistent_root')
+        or root.parent.parent
+    )
+    pointer = None
+    if run_id:
+        pointer = write_resume_pointer(
+            persist,
+            campaign_run_id=run_id,
+            terminal_reason=terminal_reason or ledger.get('terminal_reason'),
+            campaign_root=root,
+        )
     summary = {
         'schema_version': 1,
-        'campaign_run_id': manifest.get('campaign_run_id'),
+        'campaign_run_id': run_id or manifest.get('campaign_run_id'),
         'terminal_reason': terminal_reason or ledger.get('terminal_reason'),
         'campaign_state': ledger.get('campaign_state'),
         'selected_count': len(ledger.get('selected') or []),
@@ -34,15 +50,22 @@ def finalize_campaign(
         'budget': budget.snapshot(),
         'selected': ledger.get('selected') or [],
         'finalized_at': utc_now(),
+        'resume_pointer': pointer,
         'restart_hint': {
-            'resume_campaign_run_id': manifest.get('campaign_run_id'),
+            'resume_campaign_run_id': run_id or manifest.get('campaign_run_id'),
+            'env_key': 'VALIDATED_RG_M7B_RESUME_ID',
+            'persist_pointer': str(persist / 'campaign_b' / 'LATEST_CAMPAIGN_B_RESUME.json'),
+            'persist_export_sh': str(
+                persist / 'campaign_b' / 'export_VALIDATED_RG_M7B_RESUME_ID.sh'
+            ),
             'queue_path': str(root / 'queue.json'),
             # Fresh wall-clock window; unfinished candidates resume from queue.
             'inherit_deadline': False,
             'enforce_wall_clock': False,
             'note': (
-                'Re-run with resume_campaign_run_id set to continue PENDING '
-                'candidates. Six-hour cutoff is optional (enforce_wall_clock).'
+                'Resume id is stored under persistent_root/campaign_b/. '
+                'Notebook 87 loads it automatically; or: '
+                f'source {persist / "campaign_b" / "export_VALIDATED_RG_M7B_RESUME_ID.sh"}'
             ),
         },
         **screening_only_payload(),
