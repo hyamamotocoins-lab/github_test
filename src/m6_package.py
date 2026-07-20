@@ -212,7 +212,26 @@ def assemble_final_certificate(
     }
     if certification_status == NOT_CERTIFIED:
         verdict['failure_gate'] = 'final_collatz'
-        verdict['failure_reason'] = 'verified q_cert_lower >= 1'
+        verdict['failure_reason'] = (
+            'certificate_upper_bound_does_not_prove_contraction: q_cert_lower >= 1'
+        )
+        verdict['mathematical_interpretation'] = {
+            'proved': (
+                'Under the declared majorant, error ledger, weights, cutoff, rank, '
+                'and composition_policy, the certified upper bound satisfies '
+                'q_cert >= 1, so contraction cannot be certified.'
+            ),
+            'not_proved': (
+                'Non-contraction of the true RG influence map. '
+                'A majorant q_cert >= 1 only yields rho(B_true) <= q_cert; '
+                'it does not imply rho(B_true) >= 1.'
+            ),
+            'status_meaning': (
+                'NOT_CERTIFIED is a verified certificate failure, '
+                'not a verified dynamical non-contraction.'
+            ),
+        }
+
     _write_json(package_root, 'verdict.json', verdict)
 
     reject_symlinks(package_root)

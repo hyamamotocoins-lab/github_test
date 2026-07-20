@@ -195,11 +195,27 @@ def assemble_one_step_package(
     }
     if certification_status == NOT_CERTIFIED:
         verdict['failure_gate'] = 'P11'
-        verdict['failure_reason'] = 'verified q_cert_lower >= 1'
+        verdict['failure_reason'] = (
+            'certificate_upper_bound_does_not_prove_contraction: q_cert_lower >= 1'
+        )
         verdict['q_cert_interval'] = [
             fraction_decimal_text(bound.q_cert.lo),
             fraction_decimal_text(bound.q_cert.hi),
         ]
+        verdict['mathematical_interpretation'] = {
+            'proved': (
+                'Under the declared one-step majorant and ledger, q_cert >= 1, '
+                'so contraction cannot be certified.'
+            ),
+            'not_proved': (
+                'Non-contraction of the true one-step RG map. '
+                'Majorant failure is not a lower bound on the true spectral radius.'
+            ),
+            'status_meaning': (
+                'NOT_CERTIFIED is a verified certificate failure, '
+                'not a verified dynamical non-contraction.'
+            ),
+        }
     _write_json(package_root, 'verdict.json', verdict)
     verify_immutable_package(package_root, dependencies=dependencies)
 

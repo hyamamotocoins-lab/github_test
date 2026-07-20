@@ -66,8 +66,8 @@ def render_m5_markdown(report: Mapping[str, Any]) -> str:
         'M5 certifies at most one RG step at fixed cutoff/rank/source class.',
         'It does not authorize continuum, thermodynamic-limit, OS positivity,',
         'or mass-gap claims. M6 must not start unless milestone_status is',
-        f'`{ONE_STEP_CERTIFIED}` or a verified `{NOT_CERTIFIED}` completion',
-        f'with phase `{M5_COMPLETE}`.',
+        f'`{ONE_STEP_CERTIFIED}` or a `{NOT_CERTIFIED}` certificate-failure completion',
+        f'with phase `{M5_COMPLETE}` (majorant failure ≠ proof of true-map expansion).',
         '',
     ])
     return '\n'.join(lines) + '\n'

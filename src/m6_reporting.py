@@ -54,6 +54,8 @@ def render_m6_markdown(report: Mapping[str, Any]) -> str:
         '',
         'Finite-cutoff, finite-step truncated SU(2) RG only.',
         'No continuum / thermodynamic-limit / mass-gap claim.',
+        'NOT_CERTIFIED means the declared majorant failed to prove q_cert < 1;',
+        'it does not prove the true RG map is non-contractive.',
         '',
     ]
     return '\n'.join(lines) + '\n'

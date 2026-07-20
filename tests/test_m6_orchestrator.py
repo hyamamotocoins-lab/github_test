@@ -44,7 +44,12 @@ def test_m6_fixture_not_certified_complete(tmp_path: Path) -> None:
     assert report['phase'] == M6_COMPLETE
     assert report['certification_status'] == NOT_CERTIFIED
     assert report['verdict']['independent_verifier'] == 'PASS'
-    assert report['verdict'].get('failure_reason') == 'verified q_cert_lower >= 1'
+    assert report['verdict'].get('failure_reason') == (
+        'certificate_upper_bound_does_not_prove_contraction: q_cert_lower >= 1'
+    )
+    interpretation = report['verdict'].get('mathematical_interpretation')
+    assert isinstance(interpretation, dict)
+    assert 'not_proved' in interpretation
 
 
 def test_m6_live_parent_package(tmp_path: Path) -> None:

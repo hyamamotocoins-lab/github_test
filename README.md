@@ -83,8 +83,13 @@ reports/M5_acceptance.json          # phase=M5_COMPLETE → M6 開始可
 audit/m5_accepted_parent.json
 ```
 
-`certification_status` は Collatz 判定により `ONE_STEP_CERTIFIED` または検証済み
-`NOT_CERTIFIED`（`q_cert_lower ≥ 1`）のどちらかです。どちらでも `M5_COMPLETE` なら M6 に進めます。
+`certification_status` は Collatz 判定により `ONE_STEP_CERTIFIED`（`q_cert_upper < 1`）
+または `NOT_CERTIFIED`（`q_cert_lower ≥ 1` で収縮を certify できない）です。どちらでも
+`M5_COMPLETE` なら M6 に進めます。
+
+重要: `q_cert ≥ 1` は **真の RG 写像の非収縮を証明しません**。証明されるのは
+「現行 majorant・誤差 ledger・重み・cutoff/rank・継承ポリシーでは収縮を certify できない」
+ことだけです。`NOT_CERTIFIED` は verified certificate failure です。
 連続極限・質量ギャップは主張しません。
 
 M6 は `notebooks/70_m6_multistep_certificate.ipynb` から実行します。凍結 LOCK の下で
@@ -94,6 +99,11 @@ M6 は `notebooks/70_m6_multistep_certificate.ipynb` から実行します。凍
 ```text
 VALIDATED_RG_M6_RUN_ID=M6-20260720T061700Z-7c4e91a2b850
 ```
+
+現行 paperspace 設計は親 M5 one-step majorant を最終値として継承するため、親と同じ
+`q_cert` になり得ます。これは multi-step 積 \(B_{K-1}\cdots B_0\) の鋭化や段ごと重み再最適化を
+まだ使っていないことを意味し、真の写像の非収縮確認ではありません。次は majorant 鋭化と
+真の multi-step 評価を先に行い、それでも閉じない場合に LOCK 管理下で scheme 変更します。
 
 現在の完了 run は次です。いずれも外部永続ストレージ `/storage` に保存されています。
 

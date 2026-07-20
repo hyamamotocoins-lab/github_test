@@ -432,10 +432,12 @@ class M6Orchestrator:
                 'decision': (
                     'ACCEPT_M6_CERTIFIED'
                     if certification_status == CERTIFIED
-                    else 'ACCEPT_M6_VERIFIED_NOT_CERTIFIED'
+                    else 'ACCEPT_M6_CERTIFICATE_FAILURE'
                 ),
                 'decision_scope': (
-                    'Finite-cutoff finite-step truncated SU(2) RG only.'
+                    'Finite-cutoff finite-step truncated SU(2) RG only. '
+                    'NOT_CERTIFIED means the declared majorant failed to prove '
+                    'q_cert < 1; it does not prove the true RG map is expansive.'
                 ),
                 'package_manifest_hash': verdict.get('package_manifest_hash'),
                 'q_cert_upper': verdict.get('q_cert_upper'),
@@ -474,9 +476,12 @@ class M6Orchestrator:
                 '# Next session plan\n\n'
                 f'1. phase={phase}, certification_status={certification_status}\n'
                 '2. Inspect artifacts/final_certificate/ and reports/M6_report.json.\n'
-                '3. If NOT_CERTIFIED, change scheme (weight_m/cutoff/rank) under LOCK '
-                'change control and reopen affected ledger leaves.\n'
-                '4. Continuum bridges remain out of scope.\n'
+                '3. If NOT_CERTIFIED: this is a verified certificate failure '
+                '(majorant did not prove q_cert<1), not a proof that the true '
+                'RG map is non-contractive.\n'
+                '4. Next: sharpen majorants / evaluate true multi-step product '
+                'B_{K-1}...B_0 before LOCK scheme changes.\n'
+                '5. Continuum bridges remain out of scope.\n'
             ),
         )
         return report
