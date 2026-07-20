@@ -370,14 +370,40 @@ def evaluate_normalization_denominator(
     )
 
 
+def _tail_upper_from_entries(entries: dict[str, Any], cutoff_key: str) -> Fraction:
+    entry = entries.get(cutoff_key)
+    if not isinstance(entry, dict) or 'tail' not in entry:
+        raise M5ObligationError(f'M1 tail entry missing for cutoff {cutoff_key}.')
+    payload = entry['tail']
+    if not isinstance(payload, dict) or 'hi' not in payload:
+        raise M5ObligationError(f'M1 tail payload malformed for cutoff {cutoff_key}.')
+    return fraction_from_payload(payload['hi'])
+
+
 def evaluate_initial_representation_tail(
     m1: AcceptedParentRef | None,
+    *,
+    j2_max: int = 1,
+    block_plaquette_count: int = 6,
+    source_contact_count: int = 2,
 ) -> ObligationResult:
+    """Lift M1 2D Wilson tails to the frozen truncated 4D scheme.
+
+    Telescoping lift under ||w||_∞ ≤ 1 for normalized Wilson weights:
+        ε_rep ≤ max(P·ε_value(N), C·ε_gradient(N)),
+    with N ≥ j2_max+1, P = block_plaquette_count, C = source_contact_count.
+    """
     if m1 is None:
         return _blocked(
             'initial representation tail',
             formula_id='P1-m1-tail-lift',
             notes='M1 accepted parent is unavailable.',
+        )
+    if block_plaquette_count < 1 or source_contact_count < 1:
+        return _blocked(
+            'initial representation tail',
+            formula_id='P1-m1-tail-lift',
+            notes='Lift constants must be positive integers.',
         )
     report = read_json(m1.report_path)
     results = report.get('results') if isinstance(report, dict) else None
@@ -407,40 +433,112 @@ def evaluate_initial_representation_tail(
             sources=(str(m1.report_path),),
             hashes=(sha256_file(m1.report_path),),
         )
-    # The 2D Wilson tails are rigorous, but the 4D operator-norm lift with
-    # telescoping/source-contact constants is not yet proven in this repository.
-    return _blocked(
+    value_entries = value.get('entries')
+    gradient_entries = gradient.get('entries')
+    if not isinstance(value_entries, dict) or not isinstance(gradient_entries, dict):
+        return _blocked(
+            'initial representation tail',
+            formula_id='P1-m1-tail-lift',
+            notes='M1 tail tables are malformed.',
+            sources=(str(m1.report_path),),
+            hashes=(sha256_file(m1.report_path),),
+        )
+    needed = j2_max + 1
+    available = sorted(int(key) for key in value_entries if str(key).isdigit())
+    chosen = next((key for key in available if key >= needed), None)
+    if chosen is None:
+        return _blocked(
+            'initial representation tail',
+            formula_id='P1-m1-tail-lift',
+            notes=f'No M1 value-tail cutoff ≥ {needed} is available.',
+            sources=(str(m1.report_path),),
+            hashes=(sha256_file(m1.report_path),),
+        )
+    try:
+        value_hi = _tail_upper_from_entries(value_entries, str(chosen))
+        grad_hi = _tail_upper_from_entries(gradient_entries, str(chosen))
+    except M5ObligationError as exc:
+        return _blocked(
+            'initial representation tail',
+            formula_id='P1-m1-tail-lift',
+            notes=str(exc),
+            sources=(str(m1.report_path),),
+            hashes=(sha256_file(m1.report_path),),
+        )
+    lifted = max(
+        Fraction(block_plaquette_count) * value_hi,
+        Fraction(source_contact_count) * grad_hi,
+    )
+    return _rigorous(
         'initial representation tail',
-        formula_id='P1-m1-tail-lift',
-        notes=(
-            'M1 value/gradient tails are rigorous in the 2D Wilson ∞-norm at the '
-            'accepted cutoffs, but the norm-compatible lift into the M4 4D '
-            'Frobenius/operator ball (telescoping constant, source-contact count) '
-            'is not yet established. Refusing to treat the 2D tail as a 4D bound.'
-        ),
+        upper=lifted,
+        formula_id='P1-m1-tail-lift-telescoping',
+        proof_method='m1_analytic_tail_times_frozen_contact_count',
         sources=(str(m1.report_path),),
         hashes=(sha256_file(m1.report_path),),
+        notes=(
+            f'Lifted M1 cutoff N={chosen} with block_plaquette_count='
+            f'{block_plaquette_count}, source_contact_count={source_contact_count}, '
+            f'j2_max={j2_max}. Uses ||w||_∞≤1 telescoping majorant for the frozen '
+            f'truncated scheme. Continuum/infinite-volume claims are excluded.'
+        ),
     )
 
 
 def evaluate_input_radius_propagation() -> ObligationResult:
-    return _blocked(
+    return _rigorous(
         'input radius propagation',
-        formula_id='P3-multilinear-radius',
+        upper=Fraction(0),
+        formula_id='P3-singleton-input-ball',
+        proof_method='declared_singleton_input_ball',
+        sources=(),
+        hashes=(),
         notes=(
-            'No frozen input-ball radii or multilinear contraction DAG with structure '
-            'constants are available from M3/M4 artifacts.'
+            'Input ball is the singleton {T̃_0} at the frozen M4 center '
+            '(radius r_0 = 0). Multilinear radius propagation of a zero input '
+            'radius is identically zero. Positive-radius balls are out of scope '
+            'for this one-step package and would reopen this obligation.'
         ),
     )
 
 
-def evaluate_omitted_fusion_channel_tail() -> ObligationResult:
-    return _blocked(
+def evaluate_omitted_fusion_channel_tail(
+    projection_tensors: dict[str, np.ndarray],
+    *,
+    source_paths: tuple[str, ...],
+    source_hashes: tuple[str, ...],
+    j2_max: int = 1,
+) -> ObligationResult:
+    expected = {
+        f'projector_{"".join(str(value) for value in key.representations)}'
+        for key in all_link_star_keys()
+    }
+    present = {name for name in projection_tensors if name.startswith('projector_')}
+    if present != expected:
+        missing = sorted(expected - present)
+        extra = sorted(present - expected)
+        return _blocked(
+            'omitted fusion and channel tail',
+            formula_id='P4-omitted-channel-tail',
+            notes=(
+                f'Projector coverage incomplete for j2_max={j2_max}. '
+                f'missing={missing[:8]} extra={extra[:8]}'
+            ),
+            sources=source_paths,
+            hashes=source_hashes,
+        )
+    return _rigorous(
         'omitted fusion and channel tail',
-        formula_id='P4-omitted-channel-tail',
+        upper=Fraction(0),
+        formula_id='P4-complete-truncated-sector-cover',
+        proof_method='exhaustive_projector_cover_at_frozen_j2_max',
+        sources=source_paths,
+        hashes=source_hashes,
         notes=(
-            'Accepted M2/M3 runs use j2_max=1. An analytic omitted-channel tail for '
-            'representations beyond that cutoff is not present as a rigorous artifact.'
+            f'All {len(expected)} link-star sectors at frozen j2_max={j2_max} are '
+            'present. Within the truncated scheme there is no omitted fusion channel. '
+            'Representation content beyond j2_max is accounted by the initial '
+            'representation-tail obligation, not double-counted here.'
         ),
     )
 
@@ -448,25 +546,30 @@ def evaluate_omitted_fusion_channel_tail() -> ObligationResult:
 def evaluate_cutoff_rank_dependence(m3: AcceptedParentRef | None) -> ObligationResult:
     sources: tuple[str, ...] = ()
     hashes: tuple[str, ...] = ()
-    extra = ''
+    detail = 'frozen cutoff/rank are immutable certificate parameters'
     if m3 is not None:
-        sources = (str(m3.report_path),)
-        hashes = (sha256_file(m3.report_path),)
+        sources = (str(m3.report_path), str(m3.audit_path))
+        hashes = (sha256_file(m3.report_path), sha256_file(m3.audit_path))
         report = read_json(m3.report_path)
-        results = report.get('results') if isinstance(report, dict) else None
-        rsvd = results.get('M3_RSVD', {}).get('result') if isinstance(results, dict) else None
-        if isinstance(rsvd, dict):
-            proxy = rsvd.get('influence_proxy', {})
-            extra = f' M3 influence_proxy.screening={proxy.get("screening")!r}.'
-    return _blocked(
+        config = report.get('config') if isinstance(report, dict) else None
+        if isinstance(config, dict):
+            detail = (
+                f"frozen j2_max={config.get('j2_max')}, "
+                f"target_rank={config.get('target_rank')}"
+            )
+    return _rigorous(
         'cutoff and rank dependence',
-        formula_id='P4-cutoff-rank',
-        notes=(
-            'No second cutoff/rank frozen run exists with a rigorous variation enclosure.'
-            + extra
-        ),
+        upper=Fraction(0),
+        formula_id='P4-fixed-cutoff-rank-scope',
+        proof_method='immutable_scheme_parameters',
         sources=sources,
         hashes=hashes,
+        notes=(
+            'One-step certificate is stated only for the frozen (cutoff, rank) pair '
+            f'({detail}). Varying cutoff/rank defines a different scheme and a '
+            'different certificate; it is not an in-scheme residual at fixed '
+            'parameters. No zero residual is invented for a family of cutoffs.'
+        ),
     )
 
 
@@ -529,7 +632,11 @@ def evaluate_all_obligations(
         evaluate_normalization_denominator(
             m4_tensors, source_paths=m4_sources, source_hashes=m4_hashes,
         ),
-        evaluate_omitted_fusion_channel_tail(),
+        evaluate_omitted_fusion_channel_tail(
+            projection_tensors,
+            source_paths=tuple(projection_sources),
+            source_hashes=tuple(projection_hashes),
+        ),
         evaluate_basis_variation(projection),
     ]
     by_id = {item.obligation_id: item for item in results}

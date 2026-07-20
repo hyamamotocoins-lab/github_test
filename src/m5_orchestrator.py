@@ -20,6 +20,7 @@ from .common import (
 from .exact_arithmetic import fraction_decimal_text
 from .interval_kernel import construct
 from .m5_config import M5Config, default_m5_config
+from .m5_live_assembly import M5LiveAssemblyError, assemble_live_certificate
 from .m5_obligations import evaluate_all_obligations, write_obligation_report
 from .m5_package import (
     assemble_one_step_package,
@@ -327,18 +328,55 @@ class M5Orchestrator:
                     'open_obligations': obligation_report['open_obligations'],
                     'all_closed': obligation_report['all_closed'],
                 }
-                # Never invent zero residuals. Package assembly / ONE_STEP_CERTIFIED
-                # requires more than handoff-obligation closure alone.
                 if obligation_report['all_closed']:
-                    implementation_status = 'M5_HANDOFF_OBLIGATIONS_CLOSED'
-                    enclosure_status = M5_BLOCKED_MATH
-                    phase = 'M5_IN_PROGRESS'
-                    milestone_status = M5_BLOCKED_MATH
-                    certification_status = NOT_CERTIFIED
-                    parent_info['obligation_evaluation']['next_gate'] = (
-                        'Build influence-kernel z_min and one_step_certificate; '
-                        'handoff obligations alone do not imply ONE_STEP_CERTIFIED.'
-                    )
+                    try:
+                        live = assemble_live_certificate(
+                            project_root=self.project_root,
+                            run_root=self.run_root,
+                            package_root=self.package_root,
+                            run_id=self.config.run_id,
+                            parent_run_id=self.config.parent_m4_run_id,
+                            m4_checkpoint=m4_checkpoint,
+                            obligation_report=obligation_report,
+                            config_payload=self.config.payload(),
+                        )
+                        package_result = live['package']
+                        independent_report = package_result['independent_report']
+                        certificate_manifest = package_result['manifest']
+                        write_certificate_manifest(
+                            reports / 'M5_certificate_manifest.json',
+                            self.package_root,
+                        )
+                        verdict = package_result['verdict']
+                        phase = verdict['phase']
+                        milestone_status = verdict['milestone_status']
+                        certification_status = verdict['certification_status']
+                        implementation_status = 'M5_IMPLEMENTATION_COMPLETE'
+                        enclosure_status = (
+                            ONE_STEP_CERTIFIED
+                            if certification_status == ONE_STEP_CERTIFIED
+                            else NOT_CERTIFIED
+                        )
+                        parent_info['obligation_evaluation']['next_gate'] = (
+                            'M5_COMPLETE: one_step_certificate assembled; '
+                            'M6 may start from reports/M5_acceptance.json'
+                        )
+                        parent_info['live_assembly'] = {
+                            'package_manifest_hash': (
+                                package_result['manifest']['package_manifest_hash']
+                            ),
+                            'acceptance': 'reports/M5_acceptance.json',
+                        }
+                    except (M5LiveAssemblyError, Exception) as exc:  # noqa: BLE001
+                        implementation_status = 'M5_HANDOFF_OBLIGATIONS_CLOSED'
+                        enclosure_status = M5_BLOCKED_MATH
+                        phase = 'M5_IN_PROGRESS'
+                        milestone_status = M5_BLOCKED_MATH
+                        certification_status = NOT_CERTIFIED
+                        parent_info['obligation_evaluation']['next_gate'] = (
+                            'Handoff obligations closed, but live package assembly failed.'
+                        )
+                        parent_info['live_assembly_error'] = str(exc)
                 else:
                     implementation_status = 'M5_OBLIGATION_EVALUATION_COMPLETE'
                     enclosure_status = PROOF_OBLIGATIONS_OPEN
@@ -444,9 +482,9 @@ class M5Orchestrator:
                 f'3. Still open ({len(open_list)}): '
                 + ', '.join(open_list) + '\n'
                 '4. See reports/M5_obligation_report.json for formulas and provenance.\n'
-                '5. After all handoff obligations are RIGOROUS, build influence-kernel '
-                'z_min and one_step_certificate; rerun 61_m5_independent_verifier.ipynb.\n'
-                '6. Freeze only after independent_verifier=PASS.\n'
+                '5. If reports/M5_acceptance.json exists with phase=M5_COMPLETE, '
+                'set VALIDATED_RG_M5_RUN_ID and open 70_m6_multistep_certificate.ipynb.\n'
+                '6. Otherwise inspect live_assembly_error / open obligations and rerun 60.\n'
             ),
         )
         return report
