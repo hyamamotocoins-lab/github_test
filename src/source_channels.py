@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Mapping
 
 import numpy as np
 
+from .cutoff_dims import leg_hilbert_sum, operator_dimension as cutoff_operator_dimension
+
 if TYPE_CHECKING:
     from .forward_ad import DualTensor
 
@@ -20,8 +22,41 @@ class SourceClass(str, Enum):
 SOURCE_CLASSES: tuple[SourceClass, ...] = tuple(SourceClass)
 
 
-def source_generators() -> dict[SourceClass, np.ndarray]:
-    coordinates = np.indices((3,) * 6, dtype=np.int8).reshape(6, -1).T
+def j2_max_from_operator_dimension(dimension: int) -> int:
+    if not isinstance(dimension, int) or isinstance(dimension, bool) or dimension < 1:
+        raise ValueError('operator_dimension must be a positive integer.')
+    for j2_max in range(0, 8):
+        if cutoff_operator_dimension(j2_max) == dimension:
+            return j2_max
+    raise ValueError(
+        f'operator_dimension={dimension} is not a supported cutoff L^6.'
+    )
+
+
+def leg_dimension_from_operator_dimension(dimension: int) -> int:
+    return leg_hilbert_sum(j2_max_from_operator_dimension(dimension))
+
+
+def source_generators(
+    *,
+    j2_max: int | None = None,
+    operator_dimension: int | None = None,
+) -> dict[SourceClass, np.ndarray]:
+    if j2_max is None and operator_dimension is None:
+        j2_max = 1
+    elif j2_max is None:
+        assert operator_dimension is not None
+        j2_max = j2_max_from_operator_dimension(int(operator_dimension))
+    elif operator_dimension is not None:
+        expected = cutoff_operator_dimension(int(j2_max))
+        if int(operator_dimension) != expected:
+            raise ValueError(
+                'j2_max/operator_dimension disagree for M4 source generators.'
+            )
+    if not isinstance(j2_max, int) or isinstance(j2_max, bool) or j2_max < 0:
+        raise ValueError('j2_max must be a nonnegative integer.')
+    leg = leg_hilbert_sum(j2_max)
+    coordinates = np.indices((leg,) * 6, dtype=np.int16).reshape(6, -1).T
     occupied = (coordinates > 0).astype(np.float64)
     temporal = occupied[:, :2]
     spatial = occupied[:, 2:]
@@ -39,8 +74,9 @@ def source_generators() -> dict[SourceClass, np.ndarray]:
             occupied.sum(axis=1) == 1
         ).astype(np.float64),
     }
+    expected = cutoff_operator_dimension(j2_max)
     for source, generator in generators.items():
-        if generator.shape != (729,) or not np.isfinite(generator).all():
+        if generator.shape != (expected,) or not np.isfinite(generator).all():
             raise ValueError(f'Invalid M4 source generator: {source.value}')
         if np.any(generator < 0.0) or not np.any(generator > 0.0):
             raise ValueError(f'Degenerate M4 source generator: {source.value}')
@@ -53,8 +89,10 @@ def generator_symmetry_residuals(
     temporal_swap = (1, 0, 2, 3, 4, 5)
     spatial_cycle = (0, 1, 3, 4, 5, 2)
     residuals: dict[str, float] = {}
+    probe = np.asarray(next(iter(generators.values())), dtype=np.float64)
+    leg = leg_dimension_from_operator_dimension(int(probe.size))
     for source in SOURCE_CLASSES:
-        value = np.asarray(generators[source], dtype=np.float64).reshape((3,) * 6)
+        value = np.asarray(generators[source], dtype=np.float64).reshape((leg,) * 6)
         for label, axes in (
             ('temporal_swap', temporal_swap),
             ('spatial_cycle', spatial_cycle),
@@ -63,6 +101,36 @@ def generator_symmetry_residuals(
                 np.max(np.abs(value - value.transpose(axes)))
             )
     return residuals
+
+
+def _validate_triad_shapes(
+    left: np.ndarray,
+    core: np.ndarray,
+    right: np.ndarray,
+    basis: np.ndarray,
+) -> tuple[int, int]:
+    if left.ndim != 2 or core.ndim != 2 or right.ndim != 2 or basis.ndim != 2:
+        raise ValueError('M4 Triad factors must be rank-2 arrays.')
+    dim, rank = left.shape
+    if (
+        core.shape != (rank, rank)
+        or right.shape != (rank, dim)
+        or basis.shape != (dim, rank)
+    ):
+        raise ValueError(
+            'M4 Triad/basis shapes must be (D,R), (R,R), (R,D), (D,R); '
+            f'got left={left.shape}, core={core.shape}, right={right.shape}, '
+            f'basis={basis.shape}.'
+        )
+    if dim < 1 or rank < 1:
+        raise ValueError('M4 Triad dimensions must be positive.')
+    # projected_rank must remain a perfect square for regroup_matrix.
+    leg = int(round(rank ** 0.5))
+    if leg * leg != rank:
+        raise ValueError(
+            f'M4 projected rank {rank} must be a perfect square for regrouping.'
+        )
+    return dim, rank
 
 
 def projected_parent_dual(
@@ -80,13 +148,7 @@ def projected_parent_dual(
     core = np.asarray(core, dtype=np.float64)
     right = np.asarray(right, dtype=np.float64)
     basis = np.asarray(basis, dtype=np.float64)
-    if (
-        left.shape != (729, 16)
-        or core.shape != (16, 16)
-        or right.shape != (16, 729)
-        or basis.shape != (729, 16)
-    ):
-        raise ValueError('M4 requires the accepted M3 rank-16 Triad shapes.')
+    dim, _rank = _validate_triad_shapes(left, core, right, basis)
     if not np.isfinite(source_scale):
         raise ValueError('M4 source scale must be finite.')
     left_projected = basis.T @ left
@@ -95,7 +157,7 @@ def projected_parent_dual(
     tangent: dict[SourceClass, np.ndarray] = {}
     for source in SOURCE_CLASSES:
         generator = np.asarray(generators[source], dtype=np.float64)
-        if generator.shape != (729,):
+        if generator.shape != (dim,):
             raise ValueError(f'M4 generator shape changed: {source.value}')
         left_derivative = basis.T @ (generator[:, None] * left)
         right_derivative = (right * generator[None, :]) @ basis
@@ -119,8 +181,11 @@ def deformed_projected_parent(
         for value in (left, core, right, basis)
     )
     left_value, core_value, right_value, basis_value = arrays
+    dim, _rank = _validate_triad_shapes(
+        left_value, core_value, right_value, basis_value,
+    )
     generator = np.asarray(generator, dtype=np.float64)
-    if generator.shape != (729,) or not np.isfinite(parameter):
+    if generator.shape != (dim,) or not np.isfinite(parameter):
         raise ValueError('Invalid M4 finite-difference source deformation.')
     weight = np.exp(parameter * generator)
     if not np.isfinite(weight).all():

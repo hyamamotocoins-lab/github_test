@@ -206,7 +206,9 @@ class M4Orchestrator:
         return None
 
     def _source_result(self) -> dict[str, Any]:
-        generators = source_generators()
+        generators = source_generators(
+            operator_dimension=self.config.operator_dimension,
+        )
         residuals = generator_symmetry_residuals(generators)
         maximum = max(residuals.values())
         if maximum > self.config.symmetry_tolerance:
@@ -331,7 +333,9 @@ class M4Orchestrator:
 
     def _finite_difference_result(self) -> dict[str, Any]:
         normalized = _dual_from_tensors(self.tensors, 'normalized')
-        generators = source_generators()
+        generators = source_generators(
+            operator_dimension=self.config.operator_dimension,
+        )
         left = self.parent_tensors['triad_left']
         core = self.parent_tensors['triad_core']
         right = self.parent_tensors['triad_right']

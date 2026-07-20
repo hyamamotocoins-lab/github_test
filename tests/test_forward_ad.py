@@ -28,9 +28,25 @@ def _dual(seed: int = 1) -> DualTensor:
 def test_source_generators_are_symmetry_reduced_and_zero_source_is_zero() -> None:
     generators = source_generators()
     assert set(generators) == set(SOURCE_CLASSES)
+    assert next(iter(generators.values())).shape == (729,)
     assert max(generator_symmetry_residuals(generators).values()) == 0.0
     zero = zero_source_dual(np.eye(4))
     assert all(np.count_nonzero(zero.tangent[source]) == 0 for source in SOURCE_CLASSES)
+
+
+def test_source_generators_support_j2_max_2_operator_dimension() -> None:
+    generators = source_generators(operator_dimension=46656)
+    assert set(generators) == set(SOURCE_CLASSES)
+    assert next(iter(generators.values())).shape == (46656,)
+    assert max(generator_symmetry_residuals(generators).values()) == 0.0
+    rng = np.random.default_rng(0)
+    left, _ = np.linalg.qr(rng.standard_normal((46656, 16)))
+    right_basis, _ = np.linalg.qr(rng.standard_normal((46656, 16)))
+    core = np.diag(np.linspace(1.0, 0.1, 16))
+    right = right_basis.T
+    from src.source_channels import projected_parent_dual
+    dual = projected_parent_dual(left, core, right, left, generators)
+    assert dual.primal.shape == (16, 16)
 
 
 def test_forward_rules_match_centered_finite_difference() -> None:
