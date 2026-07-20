@@ -409,12 +409,39 @@ class CheckpointManager:
             verify_started = time.monotonic()
             self.verify(final)
             verify_elapsed = time.monotonic() - verify_started
+            self.prune_old_checkpoints(keep_last=self._keep_last_checkpoints())
             return CheckpointSaveResult(final, next_index, directory_size(final), save_elapsed, verify_elapsed)
         except Exception:
             state.checkpoint_index = previous_index
             if temporary.exists():
                 shutil.rmtree(temporary, ignore_errors=True)
             raise
+
+    def _keep_last_checkpoints(self) -> int:
+        raw = os.environ.get('VALIDATED_RG_CHECKPOINT_KEEP', '5').strip()
+        try:
+            keep = int(raw)
+        except ValueError:
+            keep = 5
+        return max(2, keep)
+
+    def prune_old_checkpoints(self, *, keep_last: int = 5) -> list[str]:
+        """Delete older committed checkpoints; keep the newest keep_last.
+
+        Staged j2=2 with tiny batches otherwise accumulates hundreds of full
+        checkpoint trees (each verified with full SHA-256), which saturates
+        disk/I/O and commonly kills Jupyter kernels with no Python traceback.
+        """
+        if keep_last < 2:
+            raise ValueError('keep_last must be >= 2 for fallback safety.')
+        paths = self._candidate_paths()  # newest first
+        removed: list[str] = []
+        for path in paths[keep_last:]:
+            if not (path / 'COMMITTED').is_file():
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(path.name)
+        return removed
 
     def verify(self, path: Path) -> None:
         if path.is_symlink() or path.parent.resolve() != self.checkpoint_root.resolve():

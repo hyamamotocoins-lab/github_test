@@ -475,7 +475,23 @@ class M2Orchestrator:
                 self.checkpoint('M2 work item exceeded attempt limit')
                 raise RuntimeError(item.last_error)
             item.status = 'running'
-            self.checkpoint(f'before M2 item {item.phase}')
+            # Tiny staged batches: skip "before" checkpoints. before+after on
+            # every 1–2 sector item creates an I/O storm that kills notebooks.
+            batch_size = item.parameters.get('batch_size')
+            skip_before = (
+                isinstance(batch_size, int)
+                and batch_size <= 8
+                and 'batch_index' in item.parameters
+            )
+            if not skip_before:
+                self.checkpoint(f'before M2 item {item.phase}')
+            else:
+                print(
+                    f'M2 start {item.phase} batch_start='
+                    f"{item.parameters.get('batch_start')} "
+                    f'batch_size={batch_size} (before-checkpoint skipped)',
+                    flush=True,
+                )
             started = time.monotonic()
             try:
                 relative, digest = self._execute_item(item)

@@ -118,7 +118,13 @@ def run_staged_m2_session(
     m2_config_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create/resume sector-batched M2 and run one Paperspace-safe session."""
+    import faulthandler
     import os
+    import sys
+
+    faulthandler.enable(file=sys.stderr, all_threads=True)
+    os.environ.setdefault('VALIDATED_RG_CHECKPOINT_KEEP', '5')
+    os.environ.setdefault('VALIDATED_RG_M2_SPLIT_BATCH_TO', '2')
 
     gate = resource_gate(j2_max)
     if j2_max == 1:
