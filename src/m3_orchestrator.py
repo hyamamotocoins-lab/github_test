@@ -457,6 +457,8 @@ class M3Orchestrator:
                 results = load_m3_phase_results(self.run_root, self.queue)
                 validate_m3_acceptance(
                     self.state, self.queue, results, self.test_report,
+                    sector_count=self.config.sector_count,
+                    operator_dimension=self.config.operator_dimension,
                 )
                 self.state.bounds = {
                     'matrix_free_validation': 'FP64_CORE_REPRODUCED',

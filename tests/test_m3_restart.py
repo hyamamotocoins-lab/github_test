@@ -111,6 +111,85 @@ def test_m3_checkpoint_resume_and_fresh_process(tmp_path: Path) -> None:
     assert 'M3_BOOTSTRAP' in completed.stdout
 
 
+def test_m3_acceptance_uses_config_operator_dims_not_j1_defaults() -> None:
+    from src.m3_reporting import m3_acceptance_gates
+
+    state = RunState(
+        'M3-j2-dims', 'c' * 64, utc_now(), utc_now(),
+        milestone='M3', phase='M3_RUNNING',
+    )
+    state.certification_status = 'NOT_CERTIFIED'
+    queue = WorkQueue()
+    for phase in (
+        'M3_BACKEND_DIAGNOSTIC', 'M3_OPERATOR_BUILD', 'M3_MATRIX_FREE_VALIDATE',
+        'M3_RSVD', 'M3_TRIAD', 'M3_REPORT',
+    ):
+        item_id = queue.add(phase, 'c' * 64, {'milestone': 'M3', 'phase': phase}, 1.0)
+        item = queue.items[item_id]
+        item.status = 'done'
+        item.result_relpath = f'artifacts/{phase}.json'
+        item.result_sha256 = 'a' * 64
+    results = {
+        'M3_BACKEND_DIAGNOSTIC': {
+            'result': {
+                'status': 'PASS',
+                'selection': {'is_cuda': True, 'dtype': 'float64'},
+                'tf32_disabled': True,
+            },
+        },
+        'M3_OPERATOR_BUILD': {
+            'result': {
+                'status': 'PASS',
+                'sector_count': 729,
+                'dimension': 46656,
+                'parent_tensor_count': 729,
+            },
+        },
+        'M3_MATRIX_FREE_VALIDATE': {
+            'result': {
+                'status': 'PASS',
+                'matvec_max_abs_error': 0.0,
+                'adjoint_relative_error': 0.0,
+                'path_cache_reused': True,
+            },
+        },
+        'M3_RSVD': {
+            'result': {
+                'status': 'PASS',
+                'singular_values': [1.0],
+                'rigor': 'EXPLORATORY_FIXED_SEED_NOT_A_CERTIFICATE',
+                'explicit_top_singular_max_abs_error': 0.0,
+                'residual_to_explicit_optimal_ratio': 1.0,
+                'target_rank': 8,
+                'milestone_status': 'CORE_REPRODUCED',
+                'influence_proxy': {'screening': 'KEEP_EXPLORING'},
+            },
+        },
+        'M3_TRIAD': {
+            'result': {
+                'status': 'PASS', 'rank': 8, 'relative_residual_frobenius': 0.0,
+            },
+        },
+        'M3_REPORT': {'result': {'status': 'READY'}},
+    }
+    tests = {
+        'accepted_m2_parent': 'PASS',
+        'm0_m1_m2_regression_cpu_suite': 'PASS',
+        'm3_required_cpu_suite': 'PASS',
+        'm3_required_gpu_suite': 'PASS',
+        'm3_fresh_process_resume': 'PASS',
+        'm3_checkpoint_basis_restore': 'PASS',
+        'm3_oom_recovery': 'PASS',
+    }
+    assert not m3_acceptance_gates(state, queue, results, tests)[
+        'operator_parent_shards_complete'
+    ]
+    assert m3_acceptance_gates(
+        state, queue, results, tests,
+        sector_count=729, operator_dimension=46656,
+    )['operator_parent_shards_complete']
+
+
 def test_m3_resume_allows_audit_rewrite_under_code_drift(tmp_path: Path) -> None:
     config, project = make_synthetic_accepted_m2(
         tmp_path, _cpu_config(),
