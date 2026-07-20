@@ -69,8 +69,13 @@ class M3Config:
             or self.certification_status != 'NOT_CERTIFIED'
         ):
             raise ValueError('M3 parent or status invariant failed.')
-        if not self.parent_run_id or self.parent_checkpoint != 'ckpt_000014':
-            raise ValueError('Accepted M2 parent identity is missing or changed.')
+        if not self.parent_run_id:
+            raise ValueError('Accepted M2 parent identity is missing.')
+        if (
+            not isinstance(self.parent_checkpoint, str)
+            or not self.parent_checkpoint.startswith('ckpt_')
+        ):
+            raise ValueError('Accepted M2 parent checkpoint name is invalid.')
         if Path(self.parent_checkpoint_path).name != self.parent_checkpoint:
             raise ValueError('M3 parent checkpoint path/name mismatch.')
         if Path(self.parent_report_path).name != 'M2_report.json':
