@@ -533,6 +533,8 @@ class M3Orchestrator:
 def create_or_resume_m3(
     persistent_root: Path, config: M3Config, project_root: Path,
     run_id: str | None = None, test_report: dict[str, Any] | None = None,
+    *,
+    allow_code_drift: bool = False,
 ) -> M3Orchestrator:
     try:
         evidence = verify_accepted_m2_parent(project_root, config)
@@ -551,6 +553,13 @@ def create_or_resume_m3(
     runtime_signature = runtime_compatibility_signature(environment)
     selection = backend_selection(probe_backend).payload()
     del probe_backend
+    env_drift = os.environ.get('VALIDATED_RG_M3_ALLOW_CODE_DRIFT', '').strip().lower()
+    allow_code_drift = bool(
+        allow_code_drift or env_drift in {'1', 'true', 'yes', 'on'}
+    )
+    relax_fields = {
+        'source_hash', 'notebook_hash', 'runtime_compatibility', 'backend_selection',
+    } if allow_code_drift else set()
     runs_root = persistent_root / 'runs'
     runs_root.mkdir(parents=True, exist_ok=True)
     requested = run_id or os.environ.get('VALIDATED_RG_M3_RUN_ID')
@@ -590,10 +599,41 @@ def create_or_resume_m3(
         if read_json(run_root / 'run_config.json') != config.canonical_payload():
             raise M3CompatibilityError('Immutable M3 config changed.')
         manifest = read_json(manifest_path) if manifest_path.is_file() else None
-        if not isinstance(manifest, dict) or any(
-            manifest.get(key) != value for key, value in immutable.items()
-        ):
-            raise M3CompatibilityError('M3 manifest/source/parent/runtime changed.')
+        if not isinstance(manifest, dict):
+            raise M3CompatibilityError('Existing M3 run lacks a valid manifest.')
+        mismatches = {
+            key: {'expected': value, 'found': manifest.get(key)}
+            for key, value in immutable.items()
+            if key not in relax_fields and manifest.get(key) != value
+        }
+        if mismatches:
+            raise M3CompatibilityError(
+                'M3 manifest/source/parent/runtime changed: '
+                + ', '.join(sorted(mismatches))
+            )
+        drifted = {
+            key: {
+                'manifest': manifest.get(key),
+                'current': immutable.get(key),
+            }
+            for key in relax_fields
+            if manifest.get(key) != immutable.get(key)
+        }
+        if drifted:
+            reports_dir = run_root / 'reports'
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(reports_dir / 'code_drift.json', {
+                'schema_version': 1,
+                'allow_code_drift': True,
+                'recorded_at': utc_now(),
+                'run_id': requested,
+                'drifted_fields': drifted,
+                'note': (
+                    'Controller source/runtime drifted since M3 run creation; '
+                    'config_hash and M2 parent identity remain pinned.'
+                ),
+            })
+            print('WARNING: resuming M3 with code drift:', ', '.join(sorted(drifted)))
         report_path = run_root / 'test_report.json'
         if test_report is None:
             effective_report = read_json(report_path) if report_path.is_file() else {}
@@ -602,11 +642,18 @@ def create_or_resume_m3(
             atomic_write_json(report_path, test_report)
         manager = CheckpointManager(
             run_root, config, source_hash, notebook_hash,
+            require_source_match=not allow_code_drift,
         )
         loaded = manager.load_latest(restore_rng=True)
         if loaded is None:
             raise M3CompatibilityError('Existing M3 run has no valid checkpoint.')
         repaired = loaded.queue.recover_interrupted(run_root)
+        if allow_code_drift:
+            repaired.extend(
+                loaded.queue.reset_transient_attempt_budget(
+                    max_item_attempts=config.max_item_attempts,
+                )
+            )
         orchestrator = M3Orchestrator(
             persistent_root, run_root, project_root, config,
             loaded.state, loaded.queue, manager, effective_report,
