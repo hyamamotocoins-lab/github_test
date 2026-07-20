@@ -20,6 +20,12 @@ def test_mint_run_id_format() -> None:
     run_id = mint_m7c_qlt1_run_id(tag='qlt1c')
     assert run_id.startswith('M7-')
     assert 'qlt1c' in run_id
+    from src.m7_status import is_allowed_campaign_c_run_id, M7_RUN_ID_CAMPAIGN_C
+    assert is_allowed_campaign_c_run_id(M7_RUN_ID_CAMPAIGN_C)
+    assert is_allowed_campaign_c_run_id(run_id)
+    assert is_allowed_campaign_c_run_id('M7-20260720T143006Z-qlt1c')
+    assert not is_allowed_campaign_c_run_id('M7-20260720T143006Z-other')
+    assert not is_allowed_campaign_c_run_id('M7-fixture')
 
 
 def test_diagnose_recommends_new_search_when_best_staged_ge_1(tmp_path: Path) -> None:

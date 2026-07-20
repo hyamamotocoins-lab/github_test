@@ -63,6 +63,7 @@ from .m7_status import (
     M7_SEARCHING,
     M7_SEARCH_SPACE_EXHAUSTED,
     SCHEME_REJECTED,
+    is_allowed_campaign_c_run_id,
 )
 from .orchestrator import governing_document_hashes
 from .runtime import environment_info
@@ -984,9 +985,11 @@ def create_or_resume_m7(
                     f'paperspace Campaign B requires run_id {M7_RUN_ID_CAMPAIGN_B}'
                 )
         elif cfg.campaign == 'C':
-            if cfg.run_id != M7_RUN_ID_CAMPAIGN_C:
+            if not is_allowed_campaign_c_run_id(cfg.run_id):
                 raise M7OrchestratorError(
-                    f'paperspace Campaign C requires run_id {M7_RUN_ID_CAMPAIGN_C}'
+                    'paperspace Campaign C requires the frozen run_id '
+                    f'{M7_RUN_ID_CAMPAIGN_C} or a minted q<1-hunt id '
+                    f'(M7-<timestamp>-qlt1c...); got {cfg.run_id!r}'
                 )
         elif cfg.run_id != M7_RUN_ID_FROZEN:
             raise M7OrchestratorError(

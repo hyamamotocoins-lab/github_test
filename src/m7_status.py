@@ -11,6 +11,25 @@ M7_RUN_ID_CAMPAIGN_B: Final = 'M7-20260720T080000Z-b7c4e91a2b85'
 M7_RUN_ID_CAMPAIGN_C: Final = 'M7-20260720T081500Z-c8d5f02b3c96'
 M6_PARENT_RUN_ID_FROZEN: Final = M6_RUN_ID_FROZEN
 
+# Paperspace Campaign C may continue under q<1 hunt run ids minted by m7_q_lt1_hunt.
+_M7C_QLT1_TAG: Final = 'qlt1c'
+
+
+def is_allowed_campaign_c_run_id(run_id: str) -> bool:
+    """Accept the frozen Campaign C id or minted q<1-hunt continuation ids."""
+    if run_id == M7_RUN_ID_CAMPAIGN_C:
+        return True
+    # M7-YYYYMMDDTHHMMSSZ-qlt1c... (see mint_m7c_qlt1_run_id)
+    if not isinstance(run_id, str) or not run_id.startswith('M7-'):
+        return False
+    parts = run_id.split('-')
+    if len(parts) < 3:
+        return False
+    stamp, tag = parts[1], parts[2]
+    if len(stamp) != 16 or stamp[8] != 'T' or not stamp.endswith('Z'):
+        return False
+    return tag.startswith(_M7C_QLT1_TAG)
+
 M7_INITIALIZED: Final = 'M7_INITIALIZED'
 M7_DIAGNOSIS_COMPLETE: Final = 'M7_DIAGNOSIS_COMPLETE'
 M7_SEARCHING: Final = 'M7_SEARCHING'
