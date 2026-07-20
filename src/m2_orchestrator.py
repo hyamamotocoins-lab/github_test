@@ -643,6 +643,16 @@ def create_or_resume_m2(
                     max_item_attempts=config.max_item_attempts,
                 )
             )
+            split_to = os.environ.get('VALIDATED_RG_M2_SPLIT_BATCH_TO', '2').strip()
+            if split_to and split_to not in {'0', 'off', 'false', 'no'}:
+                from .m2_batching import split_pending_batched_items
+                repaired.extend(
+                    split_pending_batched_items(
+                        loaded.queue,
+                        max_batch_size=max(1, int(split_to)),
+                        input_hash=config_hash,
+                    )
+                )
         orchestrator = M2Orchestrator(
             persistent_root, run_root, project_root, config,
             loaded.state, loaded.queue, manager, effective_test_report,
@@ -650,7 +660,7 @@ def create_or_resume_m2(
         )
         if repaired:
             orchestrator.checkpoint(
-                f'recovered {len(repaired)} interrupted/transient M2 item(s)',
+                f'recovered {len(repaired)} interrupted/transient/split M2 item(s)',
             )
         print('Resumed M2 from:', loaded.path)
         return orchestrator

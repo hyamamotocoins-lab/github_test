@@ -8,7 +8,37 @@ from src.m2_config import M2Config
 from src.m7_staged_lineage import inspect_staged_m2_progress
 
 
-def test_reset_transient_attempt_budget() -> None:
+def test_split_pending_batched_items() -> None:
+    from src.m2_batching import split_pending_batched_items
+    from src.work_queue import WorkQueue
+
+    queue = WorkQueue()
+    input_hash = 'a' * 64
+    old = queue.add(
+        'M2_DENSE_REFERENCE',
+        input_hash,
+        {
+            'milestone': 'M2',
+            'phase': 'M2_DENSE_REFERENCE',
+            'batch_index': 0,
+            'batch_start': 0,
+            'batch_size': 16,
+            'total_sectors': 729,
+            'n_batches': 46,
+        },
+        predicted_s=60.0,
+    )
+    repaired = split_pending_batched_items(
+        queue, max_batch_size=2, input_hash=input_hash,
+    )
+    assert old in repaired
+    assert old not in queue.items
+    pending = [i for i in queue.items.values() if i.status == 'pending']
+    assert len(pending) == 8
+    assert all(i.parameters['batch_size'] == 2 for i in pending)
+    starts = sorted(i.parameters['batch_start'] for i in pending)
+    assert starts == list(range(0, 16, 2))
+
     from src.work_queue import WorkQueue
 
     queue = WorkQueue()

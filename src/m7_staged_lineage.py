@@ -118,6 +118,8 @@ def run_staged_m2_session(
     m2_config_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create/resume sector-batched M2 and run one Paperspace-safe session."""
+    import os
+
     gate = resource_gate(j2_max)
     if j2_max == 1:
         batch = 0
@@ -127,20 +129,45 @@ def run_staged_m2_session(
                 'Staged M2 blocked: '
                 + '; '.join(gate.get('staged_blocked_reasons') or ['unknown'])
             )
-        batch = (
-            int(sector_batch_size)
-            if sector_batch_size is not None
-            else default_sector_batch_size(j2_max, gate)
-        )
+        env_batch = os.environ.get('VALIDATED_RG_M2_SECTOR_BATCH_SIZE', '').strip()
+        if sector_batch_size is not None:
+            batch = int(sector_batch_size)
+        elif env_batch:
+            batch = int(env_batch)
+        else:
+            # Small default: large batches are often killed mid-SymPy with no traceback.
+            batch = 2
         if batch < 1:
             raise M7StagedLineageError('Staged M2 requires sector_batch_size>=1.')
 
-    base = asdict(M2Config())
-    if m2_config_overrides:
-        base.update(m2_config_overrides)
-    base['j2_max'] = int(j2_max)
-    base['sector_batch_size'] = int(batch)
-    config = M2Config(**base)
+    # Resume must reuse the frozen run_config.json payload (config_hash pin).
+    if run_id:
+        existing_config = Path(persistent_root) / 'runs' / run_id / 'run_config.json'
+        if existing_config.is_file():
+            payload = read_json(existing_config)
+            if not isinstance(payload, dict):
+                raise M7StagedLineageError('Existing M2 run_config.json malformed.')
+            if 'orientations' in payload and isinstance(payload['orientations'], list):
+                payload = {
+                    **payload,
+                    'orientations': tuple(payload['orientations']),
+                }
+            config = M2Config(**payload)
+        else:
+            base = asdict(M2Config())
+            if m2_config_overrides:
+                base.update(m2_config_overrides)
+            base['j2_max'] = int(j2_max)
+            base['sector_batch_size'] = int(batch)
+            config = M2Config(**base)
+    else:
+        base = asdict(M2Config())
+        if m2_config_overrides:
+            base.update(m2_config_overrides)
+        base['j2_max'] = int(j2_max)
+        base['sector_batch_size'] = int(batch)
+        config = M2Config(**base)
+
     orch = create_or_resume_m2(
         persistent_root,
         config,

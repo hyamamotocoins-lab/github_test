@@ -43,6 +43,65 @@ def predicted_batch_s(batch_size: int, *, per_sector_s: float = 45.0) -> float:
     return min(15.0 * 60.0, raw)
 
 
+def split_pending_batched_items(
+    queue: Any,
+    *,
+    max_batch_size: int,
+    input_hash: str,
+) -> list[str]:
+    """Replace oversized pending batched items with smaller contiguous slices.
+
+    Does not change M2Config (config_hash stays pinned). Used when session
+    kills interrupt large SymPy batches before they can checkpoint.
+    """
+    from .work_queue import WorkQueue
+
+    if max_batch_size < 1:
+        raise ValueError('max_batch_size must be positive.')
+    if not isinstance(queue, WorkQueue):
+        raise TypeError('queue must be a WorkQueue')
+    repaired: list[str] = []
+    # Snapshot values — we mutate queue.items while iterating.
+    candidates = [
+        item for item in list(queue.items.values())
+        if (
+            item.status == 'pending'
+            and item.phase in BATCHED_M2_PHASES
+            and isinstance(item.parameters.get('batch_size'), int)
+            and int(item.parameters['batch_size']) > max_batch_size
+            and isinstance(item.parameters.get('batch_start'), int)
+        )
+    ]
+    for item in candidates:
+        start = int(item.parameters['batch_start'])
+        size = int(item.parameters['batch_size'])
+        total = int(item.parameters.get('total_sectors') or (start + size))
+        del queue.items[item.item_id]
+        repaired.append(item.item_id)
+        offset = 0
+        while offset < size:
+            piece = min(max_batch_size, size - offset)
+            piece_start = start + offset
+            # batch_index == batch_start keeps merge order stable and unique.
+            queue.add(
+                item.phase,
+                input_hash,
+                {
+                    'milestone': 'M2',
+                    'phase': item.phase,
+                    'batch_index': piece_start,
+                    'batch_start': piece_start,
+                    'batch_size': piece,
+                    'total_sectors': total,
+                    'n_batches': int(math.ceil(total / max_batch_size)),
+                    'split_from': item.item_id,
+                },
+                predicted_s=predicted_batch_s(piece),
+            )
+            offset += piece
+    return repaired
+
+
 def proof_artifact_hash_map(queue_items: Any) -> dict[str, str]:
     """Stable proof-artifact map; batched phases use phase#bNNNN keys."""
     mapping: dict[str, str] = {}
@@ -69,8 +128,9 @@ def merge_m2_batch_payloads(
     expected = expected_m2_gate_counts(j2_max)
     ordered = sorted(
         batch_payloads,
-        key=lambda payload: int(
-            (payload.get('result') or {}).get('batch_index', 0),
+        key=lambda payload: (
+            int((payload.get('result') or {}).get('batch_start', 0)),
+            int((payload.get('result') or {}).get('batch_index', 0)),
         ),
     )
     sectors: list[Any] = []
