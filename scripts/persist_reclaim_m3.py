@@ -16,6 +16,12 @@ Reclaim modes
   reports/acceptance/config/artifacts/work_items. After this, that M3
   cannot be used as an M4 parent resume source (fail-closed by design).
 
+``strip-tensors``:
+  Same eligibility as strip-checkpoints, but only deletes
+  ``checkpoints/*/tensors/`` (and similar bulky tensor dirs). Keeps
+  checkpoint metadata / LATEST. Marker:
+  ``STRIPPED_TENSORS_FOR_RECLAIM.json``.
+
 ``keep-latest-checkpoint`` (Option C):
   Keep only the newest ``COMMITTED`` ``ckpt_*``; delete older checkpoint
   dirs. Useful for incomplete / still-needed runs that may resume.
@@ -47,6 +53,9 @@ Paperspace (from repo root)::
 
   # Execute safe strip
   python scripts/persist_reclaim_m3.py --mode strip-checkpoints --execute
+
+  # Tensors-only (keeps ckpt metadata / LATEST)
+  python scripts/persist_reclaim_m3.py --mode strip-tensors --execute
 """
 
 from __future__ import annotations
@@ -73,6 +82,7 @@ from src.campaign_b.m3_reclaim import (  # noqa: E402
     fmt_bytes,
     keep_latest_for_run,
     strip_checkpoints_for_run,
+    strip_tensors_for_run,
 )
 
 
@@ -84,6 +94,8 @@ def print_report(rows: list[M3Classification], *, mode: str) -> dict[str, Any]:
     unreferenced = total - referenced
     strip_targets = [r for r in rows if r.reclaimable_strip_bytes > 0]
     strip_bytes = sum(r.reclaimable_strip_bytes for r in strip_targets)
+    tensor_targets = [r for r in rows if r.reclaimable_tensors_bytes > 0]
+    tensor_reclaim = sum(r.reclaimable_tensors_bytes for r in tensor_targets)
     keep_latest_bytes = sum(r.reclaimable_keep_latest_bytes for r in rows)
     total_size = sum(r.size_bytes for r in rows)
     ckpt_size = sum(r.checkpoints_bytes for r in rows)
@@ -107,6 +119,13 @@ def print_report(rows: list[M3Classification], *, mode: str) -> dict[str, Any]:
             '  criterion: M3_COMPLETE + downstream M4_COMPLETE/M5/M6 '
             '+ not CERTIFIED lineage + checkpoints present'
         )
+    elif mode == 'strip-tensors':
+        print(f'  safe_tensor_targets: {len(tensor_targets)}')
+        print(f'  reclaimable:         {fmt_bytes(tensor_reclaim)}')
+        print(
+            '  criterion: same as strip-checkpoints; delete only '
+            'checkpoints/*/tensors (keep metadata / LATEST)'
+        )
     elif mode == 'keep-latest-checkpoint':
         print(f'  reclaimable:        {fmt_bytes(keep_latest_bytes)}')
         print('  criterion: delete older/incomplete ckpt_* ; keep newest COMMITTED')
@@ -128,6 +147,16 @@ def print_report(rows: list[M3Classification], *, mode: str) -> dict[str, Any]:
             f'  {fmt_bytes(row.reclaimable_strip_bytes):>12}  {row.run_rel}  '
             f'refs={len(row.package_refs)}'
         )
+    if mode == 'strip-tensors':
+        print()
+        print('=== top reclaim candidates (strip-tensors) ===')
+        for row in sorted(
+            tensor_targets, key=lambda r: r.reclaimable_tensors_bytes, reverse=True,
+        )[:20]:
+            print(
+                f'  {fmt_bytes(row.reclaimable_tensors_bytes):>12}  {row.run_rel}  '
+                f'refs={len(row.package_refs)}'
+            )
     skipped = [r for r in rows if r.reclaimable_strip_bytes <= 0]
     reason_counts: dict[str, int] = {}
     for row in skipped:
@@ -149,6 +178,8 @@ def print_report(rows: list[M3Classification], *, mode: str) -> dict[str, Any]:
         'tensors_size_bytes': tensor_size,
         'strip_targets': len(strip_targets),
         'reclaimable_strip_bytes': strip_bytes,
+        'tensor_strip_targets': len(tensor_targets),
+        'reclaimable_tensors_bytes': tensor_reclaim,
         'reclaimable_keep_latest_bytes': keep_latest_bytes,
         'skip_reason_counts': reason_counts,
     }
@@ -173,6 +204,15 @@ def execute_mode(
         targets = [r for r in rows if r.reclaimable_strip_bytes > 0]
         for row in targets:
             nbytes, label = strip_checkpoints_for_run(
+                persistent_root, row, execute=execute,
+            )
+            print(f'{label:28s} {fmt_bytes(nbytes):>12}  {row.run_rel}')
+            freed += nbytes
+            actions += 1
+    elif mode == 'strip-tensors':
+        targets = [r for r in rows if r.reclaimable_tensors_bytes > 0]
+        for row in targets:
+            nbytes, label = strip_tensors_for_run(
                 persistent_root, row, execute=execute,
             )
             print(f'{label:28s} {fmt_bytes(nbytes):>12}  {row.run_rel}')
@@ -250,7 +290,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         '--mode',
-        choices=('strip-checkpoints', 'keep-latest-checkpoint', 'delete-run'),
+        choices=(
+            'strip-checkpoints',
+            'strip-tensors',
+            'keep-latest-checkpoint',
+            'delete-run',
+        ),
         default='strip-checkpoints',
         help='Reclaim strategy (default: strip-checkpoints)',
     )

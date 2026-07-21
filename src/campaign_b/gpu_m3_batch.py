@@ -354,14 +354,121 @@ def _write_gpu_status(package: Path, payload: dict[str, Any]) -> None:
         atomic_write_json(package / 'ADVANCE.json', advance)
 
 
+def write_m3_recipe_stub(
+    *,
+    run_root: Path,
+    package: Path | None,
+    m3_run_id: str,
+    m2_run_id: str | None,
+    config: Any,
+) -> dict[str, Any]:
+    """Write regeneratability recipe at M3_COMPLETE (tensors may be stripped later).
+
+    Does not delete tensors — M4 still needs them until downstream consumes.
+    """
+    from .execution_keys import M3_EXECUTION_KEY
+    from .schemas import CERTIFICATION_STATUS, CLAIM_SCOPE
+
+    run_root = Path(run_root)
+    reports = run_root / 'reports'
+    reports.mkdir(parents=True, exist_ok=True)
+
+    scheme: dict[str, Any] = {}
+    if package is not None:
+        manifest = _load_json(Path(package) / 'candidate_manifest.json') or {}
+        raw_scheme = manifest.get('scheme') if isinstance(manifest, dict) else None
+        if isinstance(raw_scheme, dict):
+            scheme = raw_scheme
+        else:
+            scheme = _load_json(Path(package) / 'scheme.json') or {}
+
+    weight = (
+        scheme.get('perron_weight_strategy')
+        or scheme.get('weight_strategy')
+        or 'all_ones'
+    )
+    if isinstance(weight, list):
+        weight = weight[0] if weight else 'all_ones'
+
+    manifest_doc = _load_json(run_root / 'run_manifest.json') or {}
+    sector_ordering = (
+        manifest_doc.get('sector_ordering')
+        if isinstance(manifest_doc, dict)
+        else None
+    ) or 'lexicographic M2 projector block ordering'
+
+    m2_hash: str | None = None
+    if package is not None:
+        from ..m2_package_audit import package_m2_audit_path
+
+        audit = _load_json(package_m2_audit_path(Path(package))) or {}
+        if isinstance(audit, dict):
+            raw_hash = (
+                audit.get('config_hash')
+                or audit.get('accepted_config_hash')
+                or audit.get('registry_record_sha256')
+            )
+            if isinstance(raw_hash, str):
+                m2_hash = raw_hash
+
+    config_hash: str | None = None
+    try:
+        config_hash = str(getattr(config, 'config_hash', None) or '')
+        if not config_hash and hasattr(config, 'canonical_payload'):
+            # Prefer hash recorded on disk if present.
+            cfg_doc = _load_json(run_root / 'run_config.json') or {}
+            if isinstance(cfg_doc, dict) and isinstance(cfg_doc.get('config_hash'), str):
+                config_hash = cfg_doc['config_hash']
+    except Exception:  # noqa: BLE001 — recipe is best-effort stub
+        config_hash = None
+
+    recipe: dict[str, Any] = {
+        'schema_version': 1,
+        'm3_run_id': m3_run_id,
+        'm3_execution_key': M3_EXECUTION_KEY,
+        'm3_config_hash': config_hash or None,
+        'm2_run_id': m2_run_id,
+        'm2_hash': m2_hash,
+        'target_rank': int(getattr(config, 'target_rank', scheme.get('target_rank', 0)) or 0),
+        'weight_strategy': str(weight),
+        'backend': 'legacy_rsvd',
+        'sector_ordering': sector_ordering,
+        'seed': int(getattr(config, 'seed', scheme.get('seed', 0)) or 0),
+        'certification_status': CERTIFICATION_STATUS,
+        'claim_scope': CLAIM_SCOPE,
+        'written_at': utc_now(),
+        'note': (
+            'Recipe stub for future regeneratability. Tensors may be stripped '
+            'after downstream M4+; do not treat this as CERTIFIED. '
+            'Tensors are NOT deleted at M3_COMPLETE (still needed for M4).'
+        ),
+        **screening_only_payload(),
+    }
+    atomic_write_json(reports / 'M3_RECIPE.json', recipe)
+
+    if package is not None:
+        pkg = Path(package)
+        pointer = {
+            'm3_run_id': m3_run_id,
+            'recipe_path': str(reports / 'M3_RECIPE.json'),
+            'updated_at': utc_now(),
+            **screening_only_payload(),
+        }
+        # Copy recipe into package for discoverability (not a symlink — portable).
+        atomic_write_json(pkg / 'm3_recipe.json', {**recipe, **pointer})
+    return recipe
+
+
 def run_one_gpu_m3(
     package: Path,
     *,
     persistent_root: Path,
     project_root: Path,
     test_report: dict[str, Any] | None = None,
+    auto_keep_latest_m3_checkpoint: bool = True,
 ) -> dict[str, Any]:
     from ..m3_orchestrator import create_or_resume_m3
+    from .m3_reclaim import keep_latest_for_m3_run_id
 
     package = Path(package)
     prepared = prepare_package_for_m3(
@@ -372,6 +479,14 @@ def run_one_gpu_m3(
     m3_run_id = str(prepared['m3_run_id'])
     config = build_m3_config(package, project_root=project_root)
     report = test_report or DEFAULT_TEST_REPORT
+    keep_latest_actions: list[dict[str, Any]] = []
+    if auto_keep_latest_m3_checkpoint:
+        # Trim before resume so prior mid-flight ckpt piles do not grow further.
+        keep_latest_actions.append(
+            keep_latest_for_m3_run_id(
+                persistent_root, m3_run_id, execute=True,
+            )
+        )
     _write_gpu_status(package, {
         'status': 'M3_RUNNING',
         'm2_run_id': prepared['m2_run_id'],
@@ -393,6 +508,22 @@ def run_one_gpu_m3(
         isinstance(result, dict) and 'M3 complete' in str(result.get('message') or '')
     )
     status = 'M3_COMPLETE' if complete else 'M3_CHECKPOINT'
+    recipe: dict[str, Any] | None = None
+    if complete:
+        recipe = write_m3_recipe_stub(
+            run_root=orch.run_root,
+            package=package,
+            m3_run_id=m3_run_id,
+            m2_run_id=str(prepared.get('m2_run_id') or ''),
+            config=config,
+        )
+    if auto_keep_latest_m3_checkpoint:
+        # After each session (COMPLETE or CHECKPOINT), keep only latest COMMITTED.
+        keep_latest_actions.append(
+            keep_latest_for_m3_run_id(
+                persistent_root, m3_run_id, execute=True,
+            )
+        )
     out = {
         'status': status,
         'm2_run_id': prepared['m2_run_id'],
@@ -400,6 +531,8 @@ def run_one_gpu_m3(
         'phase': phase,
         'run_root': str(orch.run_root),
         'result': result,
+        'keep_latest': keep_latest_actions,
+        'm3_recipe_written': recipe is not None,
         **screening_only_payload(),
     }
     _write_gpu_status(package, out)
@@ -414,6 +547,7 @@ def run_gpu_m3_batch(
     max_queue: int = 50,
     only_campaign_run_id: str | None = None,
     test_report: dict[str, Any] | None = None,
+    auto_keep_latest_m3_checkpoint: bool = True,
 ) -> dict[str, Any]:
     """Run up to max_sessions sequential GPU M3 sessions (resume-friendly)."""
     persistent_root = Path(persistent_root)
@@ -425,20 +559,24 @@ def run_gpu_m3_batch(
     )
     session_results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
+    keep_latest_bytes = 0
     started = utc_now()
     for index, row in enumerate(queue):
         if index >= int(max_sessions):
             break
         package = Path(row['package'])
         try:
-            session_results.append(
-                run_one_gpu_m3(
-                    package,
-                    persistent_root=persistent_root,
-                    project_root=project_root,
-                    test_report=test_report,
-                )
+            result = run_one_gpu_m3(
+                package,
+                persistent_root=persistent_root,
+                project_root=project_root,
+                test_report=test_report,
+                auto_keep_latest_m3_checkpoint=auto_keep_latest_m3_checkpoint,
             )
+            session_results.append(result)
+            for action in result.get('keep_latest') or []:
+                if isinstance(action, dict):
+                    keep_latest_bytes += int(action.get('bytes_freed') or 0)
         except Exception as exc:  # noqa: BLE001 — continue other candidates
             msg = f'{type(exc).__name__}: {exc}'
             blocked = (
@@ -458,6 +596,8 @@ def run_gpu_m3_batch(
                 'error': err['error'],
             })
 
+    from .m3_reclaim import fmt_bytes
+
     summary = {
         'schema_version': 1,
         'session_id': f"GPU-M3-{utc_now().replace(':', '').replace('-', '')[:15]}Z",
@@ -469,6 +609,9 @@ def run_gpu_m3_batch(
         'sessions_error': len(errors),
         'm3_complete': sum(1 for r in session_results if r.get('status') == 'M3_COMPLETE'),
         'm3_checkpoint': sum(1 for r in session_results if r.get('status') == 'M3_CHECKPOINT'),
+        'auto_keep_latest_m3_checkpoint': bool(auto_keep_latest_m3_checkpoint),
+        'keep_latest_bytes_freed': keep_latest_bytes,
+        'keep_latest_bytes_freed_human': fmt_bytes(keep_latest_bytes),
         'best_queued_q': next(
             (r.get('q_upper') for r in queue if r.get('q_upper') is not None),
             None,
@@ -477,7 +620,12 @@ def run_gpu_m3_batch(
         'errors': errors[:50],
         'note': (
             'GPU staged M3 only. NOT_CERTIFIED. Production M6 forbidden. '
-            'Re-run notebook 91 to resume incomplete M3 sessions.'
+            + (
+                f'Auto keep-latest ON (freed≈{fmt_bytes(keep_latest_bytes)}). '
+                if auto_keep_latest_m3_checkpoint
+                else 'Auto keep-latest OFF. '
+            )
+            + 'Re-run notebook 91 to resume incomplete M3 sessions.'
         ),
         **screening_only_payload(),
     }

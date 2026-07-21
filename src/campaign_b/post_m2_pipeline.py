@@ -51,6 +51,10 @@ class PostM2Config:
     drain_existing_backlog: bool = True
     # After M4+ consumes M3, strip M3 checkpoints (fail-closed criteria).
     auto_strip_m3_checkpoints: bool = True
+    # Cap total runs/M3-* size (GiB); None disables. Default matches notebook 97.
+    persist_m3_cap_gib: float | None = 80.0
+    # During active M3: keep only latest COMMITTED ckpt (quota crisis default ON).
+    auto_keep_latest_m3_checkpoint: bool = True
 
 
 def _ledger_root(persistent_root: Path) -> Path:
@@ -98,6 +102,8 @@ def run_post_m2_pipeline(
     drain_existing_backlog: bool = True,
     disable_session_wallclock: bool = True,
     auto_strip_m3_checkpoints: bool = True,
+    persist_m3_cap_gib: float | None = 80.0,
+    auto_keep_latest_m3_checkpoint: bool = True,
 ) -> dict[str, Any]:
     """Drain M2-ready backlog (default) or run backlog-aware end-to-end.
 
@@ -109,10 +115,15 @@ def run_post_m2_pipeline(
     When ``drain_existing_backlog=False``: Phase-1 ``run_end_to_end`` loop
     (M3-first, optional screening when backlog thin).
 
-    ``auto_strip_m3_checkpoints`` (default True): after each pipeline round,
-    delete M3 ``checkpoints/`` for runs already consumed by M4+ (same
-    fail-closed criteria as ``scripts/persist_reclaim_m3.py``). Ledger records
+    ``auto_strip_m3_checkpoints`` (default True): session-start full strip of
+    COMPLETE+downstream M3, plus per-round incremental strip. Ledger records
     stripped count / GiB. See ``docs/campaign_b_m3_storage_reclaim.md``.
+
+    ``persist_m3_cap_gib`` (default 80.0; None disables): after each strip,
+    enforce a ``runs/M3-*`` size cap (oldest eligible first).
+
+    ``auto_keep_latest_m3_checkpoint`` (default True): during M3 sessions,
+    trim older ``ckpt_*`` so mid-flight runs do not accumulate many checkpoints.
 
     Recommended ops: notebook 89 (producer) ∥ this consumer. Backlog growth is OK.
     Exclusive GPU lane lease under campaign_b/_locks/gpu_lane.json — do not run
@@ -139,6 +150,8 @@ def run_post_m2_pipeline(
         skip_screening=skip_screening,
         drain_existing_backlog=drain_existing_backlog,
         auto_strip_m3_checkpoints=bool(auto_strip_m3_checkpoints),
+        persist_m3_cap_gib=persist_m3_cap_gib,
+        auto_keep_latest_m3_checkpoint=bool(auto_keep_latest_m3_checkpoint),
     )
     if cfg.disable_session_wallclock:
         os.environ[_DISABLE_WALLCLOCK_ENV] = '1'
@@ -164,6 +177,8 @@ def run_post_m2_pipeline(
                 max_queue=cfg.max_queue,
                 only_campaign_run_id=cfg.only_campaign_run_id,
                 auto_strip_m3_checkpoints=cfg.auto_strip_m3_checkpoints,
+                persist_m3_cap_gib=cfg.persist_m3_cap_gib,
+                auto_keep_latest_m3_checkpoint=cfg.auto_keep_latest_m3_checkpoint,
             )
             mode = 'drain_existing_backlog'
             inner_key = 'pipeline_to_m6'
@@ -173,6 +188,10 @@ def run_post_m2_pipeline(
                 'rounds_run': inner.get('rounds_run'),
                 'totals': inner.get('totals'),
                 'auto_strip_m3_checkpoints': inner.get('auto_strip_m3_checkpoints'),
+                'auto_keep_latest_m3_checkpoint': inner.get(
+                    'auto_keep_latest_m3_checkpoint',
+                ),
+                'persist_m3_cap_gib': inner.get('persist_m3_cap_gib'),
                 'm3_reclaim': m3_reclaim,
             }
             note = (
@@ -189,11 +208,20 @@ def run_post_m2_pipeline(
                     if cfg.auto_strip_m3_checkpoints
                     else 'Auto-strip M3 checkpoints OFF. '
                 )
+                + (
+                    f"Keep-latest ON "
+                    f"(freed≈{m3_reclaim.get('keep_latest_bytes_freed_human', '0 B')}). "
+                    if cfg.auto_keep_latest_m3_checkpoint
+                    else 'Keep-latest OFF. '
+                )
                 + 'NOT_CERTIFIED / SCREENING_ONLY.'
             )
         else:
             from .end_to_end import EndToEndConfig, run_end_to_end
-            from .m3_reclaim import strip_eligible_m3_checkpoints
+            from .m3_reclaim import (
+                enforce_persist_m3_cap,
+                strip_eligible_m3_checkpoints,
+            )
 
             e2e = EndToEndConfig(
                 persistent_root=cfg.persistent_root,
@@ -213,12 +241,22 @@ def run_post_m2_pipeline(
                 disable_session_wallclock=cfg.disable_session_wallclock,
             )
             # Nested lease with end_to_end acquire_gpu_lock is intentional.
-            inner = run_end_to_end(e2e)
+            # Session-start full strip before e2e so backlog reclaim is not
+            # gated on this loop producing PRE_M6_READY.
             m3_reclaim: dict[str, Any] = {}
             if cfg.auto_strip_m3_checkpoints:
                 m3_reclaim = strip_eligible_m3_checkpoints(
                     cfg.persistent_root, execute=True,
                 ).as_dict()
+                m3_reclaim['force_full_scan'] = True
+                if cfg.persist_m3_cap_gib is not None:
+                    cap = enforce_persist_m3_cap(
+                        cfg.persistent_root,
+                        cap_gib=float(cfg.persist_m3_cap_gib),
+                        execute=True,
+                    )
+                    m3_reclaim['persist_cap'] = cap
+            inner = run_end_to_end(e2e)
             mode = 'end_to_end'
             inner_key = 'end_to_end'
             inner_summary = {
@@ -249,6 +287,8 @@ def run_post_m2_pipeline(
         'drain_existing_backlog': cfg.drain_existing_backlog,
         'skip_screening': cfg.skip_screening,
         'auto_strip_m3_checkpoints': cfg.auto_strip_m3_checkpoints,
+        'auto_keep_latest_m3_checkpoint': cfg.auto_keep_latest_m3_checkpoint,
+        'persist_m3_cap_gib': cfg.persist_m3_cap_gib,
         'm3_reclaim': (
             (inner.get('m3_reclaim') if isinstance(inner.get('m3_reclaim'), dict) else None)
             or (inner_summary.get('m3_reclaim') if isinstance(inner_summary, dict) else None)

@@ -209,6 +209,121 @@ def test_auto_strip_after_round_uses_pre_m6_package(tmp_path: Path) -> None:
     assert m3 in out['preferred_run_ids']
 
 
+def test_force_full_scan_strips_backlog_without_pre_m6(tmp_path: Path) -> None:
+    """Session-start full scan must reclaim eligible runs even with no PRE_M6."""
+    root = tmp_path / 'persist'
+    m3 = 'M3-backlog'
+    m4 = 'M4-backlog'
+    _m3_complete_tree(root / 'runs' / m3, ckpt_blob=800)
+    _m4_complete(root, m4)
+    _package(root, campaign='camp1', name='pkg', m3=m3, m4=m4)
+
+    out = lib.auto_strip_after_pipeline_round(
+        root,
+        pre_m6_summary={'results': []},
+        m6_summary={'results': []},
+        execute=True,
+        force_full_scan=True,
+    )
+    assert out['force_full_scan'] is True
+    assert out['scope'] == 'full_scan'
+    assert out['stripped'] == 1
+    assert (root / 'runs' / m3 / 'checkpoints' / 'STRIPPED_FOR_RECLAIM.json').is_file()
+
+
+def test_strip_tensors_keeps_ckpt_metadata(reclaim, tmp_path: Path) -> None:
+    root = tmp_path / 'persist'
+    m3 = 'M3-tensors-only'
+    m4 = 'M4-tensors-only'
+    _m3_complete_tree(root / 'runs' / m3, ckpt_blob=1200, n_ckpts=2)
+    _m4_complete(root, m4)
+    _package(root, campaign='camp1', name='pkg', m3=m3, m4=m4)
+
+    code = reclaim.main([
+        '--persistent-root', str(root),
+        '--mode', 'strip-tensors',
+        '--execute',
+    ])
+    assert code == 0
+    ckpt = root / 'runs' / m3 / 'checkpoints' / 'ckpt_000001'
+    assert ckpt.is_dir()
+    assert (ckpt / 'COMMITTED').is_file()
+    assert (ckpt / 'state.json').is_file()
+    assert not (ckpt / 'tensors').exists()
+    assert (
+        root / 'runs' / m3 / 'checkpoints' / 'STRIPPED_TENSORS_FOR_RECLAIM.json'
+    ).is_file()
+    assert (root / 'runs' / m3 / 'reports' / 'M3_report.json').is_file()
+
+
+def test_enforce_persist_m3_cap_strips_oldest(tmp_path: Path) -> None:
+    root = tmp_path / 'persist'
+    # Two eligible runs; tiny cap forces at least one strip.
+    for suffix, blob in (('old', 5000), ('new', 5000)):
+        m3 = f'M3-cap-{suffix}'
+        m4 = f'M4-cap-{suffix}'
+        run = root / 'runs' / m3
+        _m3_complete_tree(run, ckpt_blob=blob)
+        _m4_complete(root, m4)
+        _package(root, campaign='camp1', name=f'pkg-{suffix}', m3=m3, m4=m4)
+        # Ensure deterministic mtime order.
+        import time
+        time.sleep(0.02)
+        run.touch()
+
+    # Cap far below total so both may be needed; at least oldest should go.
+    out = lib.enforce_persist_m3_cap(root, cap_gib=0.000001, execute=True)
+    assert out['stripped'] >= 1
+    assert out['bytes_freed'] > 0
+    assert (root / 'runs' / 'M3-cap-old' / 'checkpoints' / 'STRIPPED_FOR_RECLAIM.json').is_file()
+
+
+def test_keep_latest_for_m3_run_id_trims_midflight(tmp_path: Path) -> None:
+    root = tmp_path / 'persist'
+    m3 = 'M3-midflight'
+    _m3_complete_tree(root / 'runs' / m3, ckpt_blob=300, n_ckpts=4)
+    out = lib.keep_latest_for_m3_run_id(root, m3, execute=True)
+    assert out['label'] == 'KEPT_LATEST_REMOVED_OLDER'
+    assert out['bytes_freed'] > 0
+    ckpts = sorted((root / 'runs' / m3 / 'checkpoints').glob('ckpt_*'))
+    assert [p.name for p in ckpts] == ['ckpt_000004']
+
+
+def test_write_m3_recipe_stub(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from src.campaign_b.gpu_m3_batch import write_m3_recipe_stub
+    from src.campaign_b.schemas import CERTIFICATION_STATUS, CLAIM_SCOPE
+
+    run_root = tmp_path / 'runs' / 'M3-recipe'
+    run_root.mkdir(parents=True)
+    pkg = tmp_path / 'campaign_b' / 'c1' / 'selected' / 'cand'
+    pkg.mkdir(parents=True)
+    _write_json(pkg / 'candidate_manifest.json', {
+        'candidate_id': 'cand',
+        'scheme': {
+            'target_rank': 16,
+            'perron_weight_strategy': 'all_ones',
+            'seed': 7,
+        },
+    })
+    config = SimpleNamespace(target_rank=16, seed=7, config_hash='abc')
+    recipe = write_m3_recipe_stub(
+        run_root=run_root,
+        package=pkg,
+        m3_run_id='M3-recipe',
+        m2_run_id='M2-parent',
+        config=config,
+    )
+    assert (run_root / 'reports' / 'M3_RECIPE.json').is_file()
+    assert (pkg / 'm3_recipe.json').is_file()
+    assert recipe['backend'] == 'legacy_rsvd'
+    assert recipe['certification_status'] == CERTIFICATION_STATUS
+    assert recipe['claim_scope'] == CLAIM_SCOPE
+    assert recipe['m2_run_id'] == 'M2-parent'
+    assert recipe['target_rank'] == 16
+
+
 def test_skip_certified_lineage_unless_flag(reclaim, tmp_path: Path) -> None:
     root = tmp_path / 'persist'
     m3 = 'M3-cert-lineage'

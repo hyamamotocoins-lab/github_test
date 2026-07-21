@@ -230,16 +230,17 @@ def test_pipeline_auto_strips_when_flag_set(tmp_path: Path) -> None:
         reclaim_calls.append({'root': root, **kwargs})
         return {
             'execute': True,
-            'scope': 'full_scan',
+            'scope': 'full_scan' if kwargs.get('force_full_scan') else 'full_scan',
             'candidates': 0,
-            'stripped': 1,
+            'stripped': 1 if kwargs.get('force_full_scan') else 0,
             'skipped': 0,
-            'bytes_freed': 42,
-            'bytes_freed_human': '42 B',
-            'run_ids': ['M3-x'],
+            'bytes_freed': 42 if kwargs.get('force_full_scan') else 0,
+            'bytes_freed_human': '42 B' if kwargs.get('force_full_scan') else '0 B',
+            'run_ids': ['M3-x'] if kwargs.get('force_full_scan') else [],
             'actions': [],
             'preferred_run_ids': [],
-            'fallback_full_scan': True,
+            'force_full_scan': bool(kwargs.get('force_full_scan')),
+            'fallback_full_scan': not bool(kwargs.get('force_full_scan')),
         }
 
     with (
@@ -261,14 +262,19 @@ def test_pipeline_auto_strips_when_flag_set(tmp_path: Path) -> None:
             project_root=tmp_path,
             max_rounds=1,
             auto_strip_m3_checkpoints=True,
+            persist_m3_cap_gib=None,
         )
 
-    assert len(reclaim_calls) == 1
+    # Session-start full scan + per-round strip.
+    assert len(reclaim_calls) == 2
+    assert reclaim_calls[0].get('force_full_scan') is True
+    assert reclaim_calls[1].get('force_full_scan') is False
     assert summary['auto_strip_m3_checkpoints'] is True
+    assert summary['auto_keep_latest_m3_checkpoint'] is True
     assert summary['m3_reclaim']['stripped'] == 1
     assert summary['m3_reclaim']['bytes_freed'] == 42
     assert summary['totals']['m3_checkpoints_stripped'] == 1
-    assert summary['rounds'][0]['m3_reclaim']['stripped'] == 1
+    assert summary['m3_reclaim']['session_start_full_scan']['stripped'] == 1
 
 
 def test_pipeline_skips_auto_strip_when_disabled(tmp_path: Path) -> None:

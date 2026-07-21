@@ -92,7 +92,14 @@ def test_post_m2_defaults_drain_via_pipeline_to_m6(tmp_path: Path) -> None:
         'rounds_run': 2,
         'totals': {'m3_complete': 3, 'advanced': 1},
         'auto_strip_m3_checkpoints': True,
-        'm3_reclaim': {'stripped': 2, 'bytes_freed': 1000, 'bytes_freed_human': '1000 B'},
+        'auto_keep_latest_m3_checkpoint': True,
+        'persist_m3_cap_gib': 80.0,
+        'm3_reclaim': {
+            'stripped': 2,
+            'bytes_freed': 1000,
+            'bytes_freed_human': '1000 B',
+            'keep_latest_bytes_freed_human': '0 B',
+        },
         'certification_status': CERTIFICATION_STATUS,
         'claim_scope': CLAIM_SCOPE,
     }
@@ -115,11 +122,14 @@ def test_post_m2_defaults_drain_via_pipeline_to_m6(tmp_path: Path) -> None:
     assert kwargs['max_rounds'] == 5
     assert kwargs['max_m3_sessions'] == 16
     assert kwargs['auto_strip_m3_checkpoints'] is True
+    assert kwargs['auto_keep_latest_m3_checkpoint'] is True
+    assert kwargs['persist_m3_cap_gib'] == 80.0
     assert summary['notebook'] == 97
     assert summary['mode'] == 'drain_existing_backlog'
     assert summary['drain_existing_backlog'] is True
     assert summary['skip_screening'] is True
     assert summary['auto_strip_m3_checkpoints'] is True
+    assert summary['auto_keep_latest_m3_checkpoint'] is True
     assert summary['m3_reclaim']['stripped'] == 2
     assert summary['gpu_workers'] == 1
     assert summary['pipeline_to_m6']['session_id'] == 'PIPE-mock'

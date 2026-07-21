@@ -10,6 +10,13 @@ CERTIFIED / ONE_STEP_CERTIFIED lineage → delete ``runs/M3-*/checkpoints/``
 (keep reports/acceptance/config/artifacts/work_items). After strip, that M3
 is no longer a valid M4 parent resume source.
 
+``strip-tensors`` (weaker): same eligibility, but only deletes
+``checkpoints/*/tensors/`` (and similar bulky tensor dirs); checkpoint
+metadata / LATEST remain. Marker: ``STRIPPED_TENSORS_FOR_RECLAIM.json``.
+
+``enforce_persist_m3_cap``: while ``runs/M3-*`` total size exceeds a GiB
+cap, strip-checkpoints oldest eligible COMPLETE+downstream runs.
+
 Never deletes selected package directories or reports.
 """
 
@@ -26,6 +33,11 @@ from typing import Any
 
 CERTIFIED_STATUSES = frozenset({'CERTIFIED', 'ONE_STEP_CERTIFIED'})
 PROTECTED_NAME_MARKERS = ('CERTIFIED', 'm6_certified_catalog')
+
+STRIPPED_CHECKPOINTS_MARKER = 'STRIPPED_FOR_RECLAIM.json'
+STRIPPED_TENSORS_MARKER = 'STRIPPED_TENSORS_FOR_RECLAIM.json'
+# Bulky tensor payload dirs under ``checkpoints/ckpt_*/``.
+TENSOR_DIR_NAMES = frozenset({'tensors', 'tensor_cache', 'tensor_blobs'})
 
 KEEP_RELATIVE_PREFIXES = (
     'reports/',
@@ -44,6 +56,8 @@ _DOWNSTREAM_READY_STATUSES = frozenset({
     'M4_COMPLETE',
     'M6_COMPLETE',
 })
+
+DEFAULT_PERSIST_M3_CAP_GIB: float = 80.0
 
 
 def fmt_bytes(n: int) -> str:
@@ -196,9 +210,13 @@ class M3Classification:
     certified_lineage: bool = False
     archived_only_refs: bool = False
     already_stripped: bool = False
+    already_stripped_tensors: bool = False
     reclaimable_strip_bytes: int = 0
+    reclaimable_tensors_bytes: int = 0
     reclaimable_keep_latest_bytes: int = 0
+    mtime: float = 0.0
     skip_reasons: list[str] = field(default_factory=list)
+    skip_reasons_tensors: list[str] = field(default_factory=list)
 
 
 def committed_ckpt_dirs(checkpoints: Path) -> list[Path]:
@@ -218,21 +236,27 @@ def committed_ckpt_dirs(checkpoints: Path) -> list[Path]:
     return found
 
 
-def tensors_bytes(checkpoints: Path) -> int:
-    total = 0
+def iter_tensor_dirs(checkpoints: Path) -> list[Path]:
+    """Return bulky tensor payload directories under ``checkpoints/ckpt_*/``."""
+    found: list[Path] = []
     if not checkpoints.is_dir():
-        return 0
+        return found
     try:
         children = list(checkpoints.iterdir())
     except OSError:
-        return 0
+        return found
     for child in children:
         if not child.is_dir() or not child.name.startswith('ckpt_'):
             continue
-        tensors = child / 'tensors'
-        if tensors.is_dir():
-            total += dir_size(tensors)
-    return total
+        for name in TENSOR_DIR_NAMES:
+            tensors = child / name
+            if tensors.is_dir():
+                found.append(tensors)
+    return found
+
+
+def tensors_bytes(checkpoints: Path) -> int:
+    return sum(dir_size(path) for path in iter_tensor_dirs(checkpoints))
 
 
 def keep_latest_reclaimable(checkpoints: Path) -> tuple[int, list[Path]]:
@@ -351,8 +375,16 @@ def classify_m3_runs(
             r.m6_cert_status in CERTIFIED_STATUSES for r in refs
         )
         archived_only = bool(refs) and all(r.archived for r in refs)
-        already_stripped = (checkpoints / 'STRIPPED_FOR_RECLAIM.json').is_file()
+        already_stripped = (checkpoints / STRIPPED_CHECKPOINTS_MARKER).is_file()
+        already_stripped_tensors = (
+            already_stripped
+            or (checkpoints / STRIPPED_TENSORS_MARKER).is_file()
+        )
         keep_latest_bytes, _ = keep_latest_reclaimable(checkpoints)
+        try:
+            mtime = run_root.stat().st_mtime
+        except OSError:
+            mtime = 0.0
 
         skip: list[str] = []
         reclaim_strip = 0
@@ -369,6 +401,23 @@ def classify_m3_runs(
         else:
             reclaim_strip = ckpt_bytes
 
+        skip_tensors: list[str] = []
+        reclaim_tensors = 0
+        if already_stripped:
+            skip_tensors.append('already_stripped')
+        elif already_stripped_tensors:
+            skip_tensors.append('already_stripped_tensors')
+        elif certified_lineage and not include_certified_lineage:
+            skip_tensors.append('certified_m6_lineage')
+        elif not complete:
+            skip_tensors.append('m3_incomplete')
+        elif not has_downstream:
+            skip_tensors.append('no_downstream_m4_complete_or_later')
+        elif tensor_bytes <= 0:
+            skip_tensors.append('no_tensors')
+        else:
+            reclaim_tensors = tensor_bytes
+
         rows.append(M3Classification(
             run_id=run_id,
             run_rel=f'runs/{run_id}',
@@ -382,9 +431,13 @@ def classify_m3_runs(
             certified_lineage=certified_lineage,
             archived_only_refs=archived_only,
             already_stripped=already_stripped,
+            already_stripped_tensors=already_stripped_tensors,
             reclaimable_strip_bytes=reclaim_strip,
+            reclaimable_tensors_bytes=reclaim_tensors,
             reclaimable_keep_latest_bytes=keep_latest_bytes,
+            mtime=mtime,
             skip_reasons=skip,
+            skip_reasons_tensors=skip_tensors,
         ))
     return rows
 
@@ -400,7 +453,28 @@ def write_stripped_marker(checkpoints: Path, *, mode: str, bytes_removed: int) -
             'This run is no longer a valid M4 parent resume source.'
         ),
     }
-    path = checkpoints / 'STRIPPED_FOR_RECLAIM.json'
+    path = checkpoints / STRIPPED_CHECKPOINTS_MARKER
+    path.write_text(json.dumps(marker, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+
+
+def write_stripped_tensors_marker(
+    checkpoints: Path,
+    *,
+    mode: str,
+    bytes_removed: int,
+) -> None:
+    checkpoints.mkdir(parents=True, exist_ok=True)
+    marker = {
+        'status': 'STRIPPED_TENSORS_FOR_RECLAIM',
+        'mode': mode,
+        'bytes_removed_approx': bytes_removed,
+        'note': (
+            'M3 checkpoint tensor payloads removed after downstream M4+ progress. '
+            'Checkpoint metadata / LATEST kept; run is no longer a valid M4 parent '
+            'resume source (tensors required for resume).'
+        ),
+    }
+    path = checkpoints / STRIPPED_TENSORS_MARKER
     path.write_text(json.dumps(marker, indent=2, sort_keys=True) + '\n', encoding='utf-8')
 
 
@@ -415,7 +489,7 @@ def strip_checkpoints_for_run(
     checkpoints = run_root / 'checkpoints'
     if not checkpoints.is_dir():
         return 0, 'SKIP_NO_CHECKPOINTS'
-    if (checkpoints / 'STRIPPED_FOR_RECLAIM.json').is_file():
+    if (checkpoints / STRIPPED_CHECKPOINTS_MARKER).is_file():
         return 0, 'SKIP_ALREADY_STRIPPED'
     bytes_to_free = dir_size(checkpoints)
     if not execute:
@@ -434,6 +508,48 @@ def strip_checkpoints_for_run(
         return 0, 'FAIL_OS'
     write_stripped_marker(checkpoints, mode='strip-checkpoints', bytes_removed=bytes_to_free)
     return bytes_to_free, 'STRIPPED_CHECKPOINTS'
+
+
+def strip_tensors_for_run(
+    persistent_root: Path,
+    row: M3Classification,
+    *,
+    execute: bool,
+) -> tuple[int, str]:
+    """Delete only bulky tensor dirs; keep checkpoint metadata / LATEST.
+
+    Same fail-closed eligibility as strip-checkpoints (caller must filter).
+    """
+    run_root = Path(persistent_root) / 'runs' / row.run_id
+    checkpoints = run_root / 'checkpoints'
+    if not checkpoints.is_dir():
+        return 0, 'SKIP_NO_CHECKPOINTS'
+    if (checkpoints / STRIPPED_CHECKPOINTS_MARKER).is_file():
+        return 0, 'SKIP_ALREADY_STRIPPED'
+    if (checkpoints / STRIPPED_TENSORS_MARKER).is_file():
+        return 0, 'SKIP_ALREADY_STRIPPED_TENSORS'
+    targets = iter_tensor_dirs(checkpoints)
+    if not targets:
+        return 0, 'SKIP_NO_TENSORS'
+    bytes_to_free = sum(dir_size(path) for path in targets)
+    if not execute:
+        return bytes_to_free, 'WOULD_STRIP_TENSORS'
+    freed = 0
+    try:
+        for path in targets:
+            if path.is_symlink():
+                print(f'  FAIL_CLOSED symlink tensor dir: {path}', file=sys.stderr)
+                return 0, 'FAIL_SYMLINK'
+            size = dir_size(path)
+            shutil.rmtree(path)
+            freed += size
+    except OSError as exc:
+        print(f'  FAILED strip-tensors {row.run_id}: {exc}', file=sys.stderr)
+        return 0, 'FAIL_OS'
+    write_stripped_tensors_marker(
+        checkpoints, mode='strip-tensors', bytes_removed=freed,
+    )
+    return freed, 'STRIPPED_TENSORS'
 
 
 def keep_latest_for_run(
@@ -461,6 +577,61 @@ def keep_latest_for_run(
         except OSError as exc:
             print(f'  FAILED remove {path}: {exc}', file=sys.stderr)
     return freed, 'KEPT_LATEST_REMOVED_OLDER'
+
+
+def keep_latest_for_m3_run_id(
+    persistent_root: Path,
+    m3_run_id: str,
+    *,
+    execute: bool = True,
+) -> dict[str, Any]:
+    """Trim older ckpt_* for one M3 run; keep newest COMMITTED only.
+
+    Used on the M3 hot path (notebook 97 / gpu_m3_batch) to stop mid-flight
+    runs from accumulating ckpt_000001…ckpt_000014. Does not require
+    downstream eligibility. Skips runs already fully stripped for reclaim.
+    """
+    persistent_root = Path(persistent_root)
+    if not isinstance(m3_run_id, str) or not m3_run_id.startswith('M3-'):
+        return {
+            'run_id': m3_run_id,
+            'bytes_freed': 0,
+            'label': 'SKIP_BAD_RUN_ID',
+            'execute': bool(execute),
+        }
+    run_root = persistent_root / 'runs' / m3_run_id
+    checkpoints = run_root / 'checkpoints'
+    if not checkpoints.is_dir():
+        return {
+            'run_id': m3_run_id,
+            'bytes_freed': 0,
+            'label': 'SKIP_NO_CHECKPOINTS',
+            'execute': bool(execute),
+        }
+    if (checkpoints / STRIPPED_CHECKPOINTS_MARKER).is_file():
+        return {
+            'run_id': m3_run_id,
+            'bytes_freed': 0,
+            'label': 'SKIP_ALREADY_STRIPPED',
+            'execute': bool(execute),
+        }
+    row = M3Classification(
+        run_id=m3_run_id,
+        run_rel=f'runs/{m3_run_id}',
+        size_bytes=0,
+        checkpoints_bytes=0,
+        tensors_bytes=0,
+        complete=False,
+        referenced=False,
+    )
+    nbytes, label = keep_latest_for_run(persistent_root, row, execute=execute)
+    return {
+        'run_id': m3_run_id,
+        'bytes_freed': nbytes,
+        'bytes_freed_human': fmt_bytes(nbytes),
+        'label': label,
+        'execute': bool(execute),
+    }
 
 
 def delete_run(
@@ -646,42 +817,234 @@ def strip_eligible_m3_checkpoints(
     )
 
 
+def strip_eligible_m3_tensors(
+    persistent_root: Path,
+    *,
+    execute: bool = True,
+    include_certified_lineage: bool = False,
+    only_run_ids: set[str] | frozenset[str] | None = None,
+) -> StripReclaimSummary:
+    """Strip tensor dirs only for fail-closed-eligible COMPLETE+downstream runs."""
+    persistent_root = Path(persistent_root)
+    rows = classify_m3_runs(
+        persistent_root,
+        include_certified_lineage=include_certified_lineage,
+        only_run_ids=only_run_ids,
+    )
+    targets = [r for r in rows if r.reclaimable_tensors_bytes > 0]
+    scope = 'incremental' if only_run_ids is not None else 'full_scan'
+    freed = 0
+    stripped = 0
+    actions: list[dict[str, Any]] = []
+    stripped_ids: list[str] = []
+    for row in targets:
+        nbytes, label = strip_tensors_for_run(
+            persistent_root, row, execute=execute,
+        )
+        actions.append({
+            'run_id': row.run_id,
+            'label': label,
+            'bytes': nbytes,
+        })
+        if label in {'STRIPPED_TENSORS', 'WOULD_STRIP_TENSORS'}:
+            freed += nbytes
+            stripped += 1
+            stripped_ids.append(row.run_id)
+    return StripReclaimSummary(
+        execute=execute,
+        scope=scope,
+        candidates=len(targets),
+        stripped=stripped,
+        skipped=len(rows) - len(targets),
+        bytes_freed=freed,
+        run_ids=stripped_ids,
+        actions=actions,
+    )
+
+
+def m3_runs_total_bytes(persistent_root: Path) -> int:
+    """Sum size of all ``runs/M3-*`` directories (non-symlink)."""
+    runs = Path(persistent_root) / 'runs'
+    if not runs.is_dir():
+        return 0
+    total = 0
+    try:
+        children = list(runs.iterdir())
+    except OSError:
+        return 0
+    for child in children:
+        if not child.is_dir() or child.is_symlink():
+            continue
+        if not child.name.startswith('M3-'):
+            continue
+        if any(marker in child.name for marker in PROTECTED_NAME_MARKERS):
+            continue
+        total += dir_size(child)
+    return total
+
+
+def enforce_persist_m3_cap(
+    persistent_root: Path,
+    *,
+    cap_gib: float,
+    execute: bool = True,
+    include_certified_lineage: bool = False,
+) -> dict[str, Any]:
+    """Strip oldest eligible COMPLETE+downstream M3 runs until under cap.
+
+    Measures ``runs/M3-*`` total size. Uses fail-closed strip-checkpoints
+    criteria (same as CLI). Stops when under cap or no eligible targets remain.
+    """
+    persistent_root = Path(persistent_root)
+    if cap_gib is None or float(cap_gib) <= 0:
+        raise ValueError('cap_gib must be a positive float (use None at call site to disable)')
+    cap_bytes = int(float(cap_gib) * (1024 ** 3))
+    before = m3_runs_total_bytes(persistent_root)
+    out: dict[str, Any] = {
+        'execute': bool(execute),
+        'cap_gib': float(cap_gib),
+        'cap_bytes': cap_bytes,
+        'bytes_before': before,
+        'bytes_before_human': fmt_bytes(before),
+        'under_cap_before': before <= cap_bytes,
+        'stripped': 0,
+        'bytes_freed': 0,
+        'run_ids': [],
+        'actions': [],
+        'bytes_after': before,
+        'bytes_after_human': fmt_bytes(before),
+        'under_cap_after': before <= cap_bytes,
+        'stopped_reason': 'already_under_cap' if before <= cap_bytes else None,
+    }
+    if before <= cap_bytes:
+        return out
+
+    rows = classify_m3_runs(
+        persistent_root,
+        include_certified_lineage=include_certified_lineage,
+    )
+    eligible = [r for r in rows if r.reclaimable_strip_bytes > 0]
+    eligible.sort(key=lambda r: (r.mtime, r.run_id))
+
+    freed = 0
+    stripped = 0
+    actions: list[dict[str, Any]] = []
+    stripped_ids: list[str] = []
+    remaining = before
+    for row in eligible:
+        if remaining <= cap_bytes:
+            break
+        nbytes, label = strip_checkpoints_for_run(
+            persistent_root, row, execute=execute,
+        )
+        actions.append({
+            'run_id': row.run_id,
+            'label': label,
+            'bytes': nbytes,
+            'mtime': row.mtime,
+        })
+        if label not in {'STRIPPED_CHECKPOINTS', 'WOULD_STRIP_CHECKPOINTS'}:
+            continue
+        freed += nbytes
+        stripped += 1
+        stripped_ids.append(row.run_id)
+        remaining = max(0, remaining - nbytes)
+
+    after = remaining if execute else max(0, before - freed)
+    # On execute, remeasure for accuracy (markers / leftover metadata).
+    if execute:
+        after = m3_runs_total_bytes(persistent_root)
+
+    stopped = 'under_cap' if after <= cap_bytes else 'no_more_eligible_targets'
+    out.update({
+        'stripped': stripped,
+        'bytes_freed': freed,
+        'bytes_freed_human': fmt_bytes(freed),
+        'run_ids': stripped_ids,
+        'actions': actions,
+        'bytes_after': after,
+        'bytes_after_human': fmt_bytes(after),
+        'under_cap_after': after <= cap_bytes,
+        'stopped_reason': stopped,
+        'eligible_candidates': len(eligible),
+    })
+    return out
+
+
 def auto_strip_after_pipeline_round(
     persistent_root: Path,
     *,
     pre_m6_summary: dict[str, Any] | None = None,
     m6_summary: dict[str, Any] | None = None,
     execute: bool = True,
+    persist_m3_cap_gib: float | None = None,
+    force_full_scan: bool = False,
 ) -> dict[str, Any]:
-    """Incremental strip from round results; fall back to one full safe scan.
+    """Incremental strip from round results; optionally force a full safe scan.
 
     Prefer run ids from this round's PRE_M6_READY / M6 results. If none are
-    found, run a full fail-closed scan once (safe when the round made no
-    strip-eligible progress, or when results omit package paths).
+    found, run a full fail-closed scan once. When ``force_full_scan`` is True
+    (session start), always run a full scan — even if incremental ids exist —
+    so backlog COMPLETE+downstream runs are stripped when this round made no
+    new PRE_M6 progress.
+
+    When ``persist_m3_cap_gib`` is not None, also enforce the size cap after
+    the incremental/full strip (oldest eligible first).
     """
     preferred = m3_run_ids_from_stage_results(
         persistent_root,
         pre_m6_summary=pre_m6_summary,
         m6_summary=m6_summary,
     )
-    if preferred:
+    out: dict[str, Any]
+    if force_full_scan:
+        summary = strip_eligible_m3_checkpoints(
+            persistent_root,
+            execute=execute,
+            only_run_ids=None,
+        )
+        out = summary.as_dict()
+        out['preferred_run_ids'] = sorted(preferred)
+        out['force_full_scan'] = True
+        out['scope'] = 'full_scan'
+    elif preferred:
         summary = strip_eligible_m3_checkpoints(
             persistent_root,
             execute=execute,
             only_run_ids=preferred,
         )
         # If incremental found ids but none were strip-eligible yet (e.g. M4
-        # not fully on disk), do not escalate — wait for later round.
+        # not fully on disk), do not escalate — wait for later round / next
+        # session-start full scan.
         out = summary.as_dict()
         out['preferred_run_ids'] = sorted(preferred)
-        return out
+    else:
+        summary = strip_eligible_m3_checkpoints(
+            persistent_root,
+            execute=execute,
+            only_run_ids=None,
+        )
+        out = summary.as_dict()
+        out['preferred_run_ids'] = []
+        out['fallback_full_scan'] = True
 
-    summary = strip_eligible_m3_checkpoints(
-        persistent_root,
-        execute=execute,
-        only_run_ids=None,
-    )
-    out = summary.as_dict()
-    out['preferred_run_ids'] = []
-    out['fallback_full_scan'] = True
+    if persist_m3_cap_gib is not None:
+        cap = enforce_persist_m3_cap(
+            persistent_root,
+            cap_gib=float(persist_m3_cap_gib),
+            execute=execute,
+        )
+        out['persist_cap'] = cap
+        # Roll cap frees into session totals when execute stripped extra runs.
+        if int(cap.get('stripped') or 0) > 0:
+            out['stripped'] = int(out.get('stripped') or 0) + int(cap['stripped'])
+            out['bytes_freed'] = int(out.get('bytes_freed') or 0) + int(
+                cap.get('bytes_freed') or 0,
+            )
+            out['bytes_freed_human'] = fmt_bytes(int(out['bytes_freed']))
+            extra_ids = [
+                rid for rid in (cap.get('run_ids') or [])
+                if rid not in (out.get('run_ids') or [])
+            ]
+            out['run_ids'] = list(out.get('run_ids') or []) + extra_ids
     return out
