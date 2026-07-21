@@ -183,9 +183,13 @@ def run_post_m2_pipeline(
             mode = 'drain_existing_backlog'
             inner_key = 'pipeline_to_m6'
             m3_reclaim = inner.get('m3_reclaim') or {}
+            stop_reason = inner.get('stop_reason')
+            remaining = inner.get('remaining_runnable') or {}
             inner_summary = {
                 'session_id': inner.get('session_id'),
                 'rounds_run': inner.get('rounds_run'),
+                'stop_reason': stop_reason,
+                'remaining_runnable': remaining,
                 'totals': inner.get('totals'),
                 'auto_strip_m3_checkpoints': inner.get('auto_strip_m3_checkpoints'),
                 'auto_keep_latest_m3_checkpoint': inner.get(
@@ -200,6 +204,7 @@ def run_post_m2_pipeline(
                 'Drains SELECTED / READY_FOR_M3 / m2_binding-READY through '
                 'advance → M3 → M6. Screening off by default. '
                 'M2_READY markers are informational only (not a wait gate). '
+                f'stop_reason={stop_reason}; re-run cell 3 after stop to resume. '
                 'GPU lane lease held; do not run concurrently with notebook 96. '
                 + (
                     f"Auto-strip M3 checkpoints ON "
@@ -289,6 +294,16 @@ def run_post_m2_pipeline(
         'auto_strip_m3_checkpoints': cfg.auto_strip_m3_checkpoints,
         'auto_keep_latest_m3_checkpoint': cfg.auto_keep_latest_m3_checkpoint,
         'persist_m3_cap_gib': cfg.persist_m3_cap_gib,
+        'stop_reason': (
+            inner.get('stop_reason')
+            if isinstance(inner.get('stop_reason'), str)
+            else None
+        ),
+        'remaining_runnable': (
+            inner.get('remaining_runnable')
+            if isinstance(inner.get('remaining_runnable'), dict)
+            else None
+        ),
         'm3_reclaim': (
             (inner.get('m3_reclaim') if isinstance(inner.get('m3_reclaim'), dict) else None)
             or (inner_summary.get('m3_reclaim') if isinstance(inner_summary, dict) else None)

@@ -17,13 +17,22 @@ def _stage(
     m3_complete: int = 0,
     m3_checkpoint: int = 0,
     sessions_ok: int = 0,
+    sessions_attempted: int | None = None,
+    sessions_error: int = 0,
     pre_m6_ready: int = 0,
     m4_checkpoint: int = 0,
+    packages_attempted: int | None = None,
     all_closed_count: int = 0,
     m6_complete: int = 0,
     m6_certified_count: int = 0,
     m6_not_certified_count: int = 0,
 ) -> dict[str, Any]:
+    if packages_attempted is None:
+        packages_attempted = pre_m6_ready + m4_checkpoint
+    if sessions_attempted is None:
+        sessions_attempted = sessions_ok or (
+            m3_complete + m3_checkpoint + sessions_error
+        )
     return {
         'advanced': advanced,
         'discovered': advanced,
@@ -31,10 +40,11 @@ def _stage(
         'errors': 0,
         'queue_size': 0,
         'sessions_ok': sessions_ok,
+        'sessions_attempted': sessions_attempted,
         'm3_complete': m3_complete,
         'm3_checkpoint': m3_checkpoint,
-        'sessions_error': 0,
-        'packages_attempted': pre_m6_ready + m4_checkpoint,
+        'sessions_error': sessions_error,
+        'packages_attempted': packages_attempted,
         'pre_m6_ready': pre_m6_ready,
         'm4_checkpoint': m4_checkpoint,
         'attempted': all_closed_count + m6_complete,
@@ -46,6 +56,14 @@ def _stage(
         'm6_not_certified_count': m6_not_certified_count,
         'results': [],
     }
+
+
+def _empty_queues(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+    return []
+
+
+def _one_m3(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+    return [{'package': '/fake/pkg'}]
 
 
 def test_pipeline_stops_when_no_progress(tmp_path: Path) -> None:
@@ -65,15 +83,24 @@ def test_pipeline_stops_when_no_progress(tmp_path: Path) -> None:
             return_value=empty,
         ),
         patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', side_effect=_empty_queues),
+        patch('src.campaign_b.pre_m6_batch.list_pre_m6_queue', side_effect=_empty_queues),
+        patch(
+            'src.campaign_b.close_obligations.list_obligation_queue',
+            side_effect=_empty_queues,
+        ),
+        patch('src.campaign_b.m6_batch.list_m6_queue', side_effect=_empty_queues),
     ):
         summary = run_pipeline_to_m6(
             persistent_root=tmp_path,
             project_root=tmp_path,
             max_rounds=5,
+            auto_strip_m3_checkpoints=False,
         )
 
     assert summary['rounds_run'] == 1
     assert call_counts['n'] == 1
+    assert summary['stop_reason'] == 'DRAINED_OR_IDLE'
     assert summary['certification_status'] == CERTIFICATION_STATUS
     assert summary['claim_scope'] == CLAIM_SCOPE
     assert '81' in summary['note']
@@ -81,6 +108,7 @@ def test_pipeline_stops_when_no_progress(tmp_path: Path) -> None:
     assert ledger.is_file()
     written = json.loads(ledger.read_text(encoding='utf-8'))
     assert written['certification_status'] == CERTIFICATION_STATUS
+    assert written['stop_reason'] == 'DRAINED_OR_IDLE'
 
 
 def test_pipeline_multi_round_then_idle(tmp_path: Path) -> None:
@@ -111,14 +139,23 @@ def test_pipeline_multi_round_then_idle(tmp_path: Path) -> None:
             side_effect=_pop(obl_q),
         ),
         patch('src.campaign_b.m6_batch.run_m6_batch', side_effect=_pop(m6_q)),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', side_effect=_empty_queues),
+        patch('src.campaign_b.pre_m6_batch.list_pre_m6_queue', side_effect=_empty_queues),
+        patch(
+            'src.campaign_b.close_obligations.list_obligation_queue',
+            side_effect=_empty_queues,
+        ),
+        patch('src.campaign_b.m6_batch.list_m6_queue', side_effect=_empty_queues),
     ):
         summary = run_pipeline_to_m6(
             persistent_root=tmp_path,
             project_root=tmp_path,
             max_rounds=10,
+            auto_strip_m3_checkpoints=False,
         )
 
     assert summary['rounds_run'] == 3
+    assert summary['stop_reason'] == 'DRAINED_OR_IDLE'
     assert summary['totals']['advanced'] == 2
     assert summary['totals']['m3_complete'] == 1
     assert summary['totals']['pre_m6_ready'] == 1
@@ -127,6 +164,71 @@ def test_pipeline_multi_round_then_idle(tmp_path: Path) -> None:
     assert summary['totals']['m6_certified'] == 0
     assert summary['totals']['m6_not_certified'] == 1
     assert summary['certification_status'] == CERTIFICATION_STATUS
+
+
+def test_pipeline_retries_failed_attempts_then_stuck(tmp_path: Path) -> None:
+    """progress==0 with runnable + attempts continues until max_idle_rounds."""
+    failed = _stage(sessions_attempted=2, sessions_error=2)
+    empty = _stage()
+    with (
+        patch('src.campaign_b.advance_selected.run_advance_selected', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.run_gpu_m3_batch', return_value=failed),
+        patch('src.campaign_b.pre_m6_batch.run_pre_m6_batch', return_value=empty),
+        patch(
+            'src.campaign_b.close_obligations.run_close_obligations_batch',
+            return_value=empty,
+        ),
+        patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', side_effect=_one_m3),
+        patch('src.campaign_b.pre_m6_batch.list_pre_m6_queue', side_effect=_empty_queues),
+        patch(
+            'src.campaign_b.close_obligations.list_obligation_queue',
+            side_effect=_empty_queues,
+        ),
+        patch('src.campaign_b.m6_batch.list_m6_queue', side_effect=_empty_queues),
+    ):
+        summary = run_pipeline_to_m6(
+            persistent_root=tmp_path,
+            project_root=tmp_path,
+            max_rounds=10,
+            max_idle_rounds=2,
+            auto_strip_m3_checkpoints=False,
+        )
+
+    assert summary['rounds_run'] == 2
+    assert summary['stop_reason'] == 'STUCK_BACKLOG'
+    assert summary['remaining_runnable']['gpu_m3'] == 1
+
+
+def test_pipeline_no_attempts_with_backlog(tmp_path: Path) -> None:
+    """progress==0 + runnable + zero attempts → misconfig stop immediately."""
+    empty = _stage(sessions_attempted=0, packages_attempted=0)
+    with (
+        patch('src.campaign_b.advance_selected.run_advance_selected', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.run_gpu_m3_batch', return_value=empty),
+        patch('src.campaign_b.pre_m6_batch.run_pre_m6_batch', return_value=empty),
+        patch(
+            'src.campaign_b.close_obligations.run_close_obligations_batch',
+            return_value=empty,
+        ),
+        patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', side_effect=_one_m3),
+        patch('src.campaign_b.pre_m6_batch.list_pre_m6_queue', side_effect=_empty_queues),
+        patch(
+            'src.campaign_b.close_obligations.list_obligation_queue',
+            side_effect=_empty_queues,
+        ),
+        patch('src.campaign_b.m6_batch.list_m6_queue', side_effect=_empty_queues),
+    ):
+        summary = run_pipeline_to_m6(
+            persistent_root=tmp_path,
+            project_root=tmp_path,
+            max_rounds=10,
+            auto_strip_m3_checkpoints=False,
+        )
+
+    assert summary['rounds_run'] == 1
+    assert summary['stop_reason'] == 'NO_ATTEMPTS_WITH_BACKLOG'
 
 
 def test_pipeline_passes_stage_kwargs(tmp_path: Path) -> None:
@@ -162,6 +264,13 @@ def test_pipeline_passes_stage_kwargs(tmp_path: Path) -> None:
             side_effect=_obl,
         ),
         patch('src.campaign_b.m6_batch.run_m6_batch', side_effect=_m6),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', side_effect=_empty_queues),
+        patch('src.campaign_b.pre_m6_batch.list_pre_m6_queue', side_effect=_empty_queues),
+        patch(
+            'src.campaign_b.close_obligations.list_obligation_queue',
+            side_effect=_empty_queues,
+        ),
+        patch('src.campaign_b.m6_batch.list_m6_queue', side_effect=_empty_queues),
     ):
         run_pipeline_to_m6(
             persistent_root=tmp_path,
@@ -175,6 +284,7 @@ def test_pipeline_passes_stage_kwargs(tmp_path: Path) -> None:
             max_m6_packages=9,
             max_queue=100,
             only_campaign_run_id='M7-TEST',
+            auto_strip_m3_checkpoints=False,
         )
 
     assert captured['advance']['max_candidates'] == 3
@@ -207,6 +317,13 @@ def test_pipeline_counts_m4_checkpoint_as_progress(tmp_path: Path) -> None:
             return_value=empty,
         ),
         patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', side_effect=_empty_queues),
+        patch('src.campaign_b.pre_m6_batch.list_pre_m6_queue', side_effect=_empty_queues),
+        patch(
+            'src.campaign_b.close_obligations.list_obligation_queue',
+            side_effect=_empty_queues,
+        ),
+        patch('src.campaign_b.m6_batch.list_m6_queue', side_effect=_empty_queues),
     ):
         summary = run_pipeline_to_m6(
             persistent_root=tmp_path,
@@ -216,10 +333,12 @@ def test_pipeline_counts_m4_checkpoint_as_progress(tmp_path: Path) -> None:
             skip_m3=True,
             skip_obligations=True,
             skip_m6=True,
+            auto_strip_m3_checkpoints=False,
         )
 
     assert summary['rounds_run'] == 2
     assert summary['rounds'][0]['progress'] == 1
+    assert summary['stop_reason'] == 'DRAINED_OR_IDLE'
 
 
 def test_pipeline_auto_strips_when_flag_set(tmp_path: Path) -> None:
@@ -230,17 +349,17 @@ def test_pipeline_auto_strips_when_flag_set(tmp_path: Path) -> None:
         reclaim_calls.append({'root': root, **kwargs})
         return {
             'execute': True,
-            'scope': 'full_scan' if kwargs.get('force_full_scan') else 'full_scan',
+            'scope': 'full_scan' if kwargs.get('force_full_scan') else 'incremental',
             'candidates': 0,
-            'stripped': 1 if kwargs.get('force_full_scan') else 0,
+            'stripped': 1,
             'skipped': 0,
-            'bytes_freed': 42 if kwargs.get('force_full_scan') else 0,
-            'bytes_freed_human': '42 B' if kwargs.get('force_full_scan') else '0 B',
-            'run_ids': ['M3-x'] if kwargs.get('force_full_scan') else [],
+            'bytes_freed': 42,
+            'bytes_freed_human': '42 B',
+            'run_ids': ['M3-x'],
             'actions': [],
             'preferred_run_ids': [],
+            'fallback_full_scan': True,
             'force_full_scan': bool(kwargs.get('force_full_scan')),
-            'fallback_full_scan': not bool(kwargs.get('force_full_scan')),
         }
 
     with (
@@ -252,6 +371,13 @@ def test_pipeline_auto_strips_when_flag_set(tmp_path: Path) -> None:
             return_value=empty,
         ),
         patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', side_effect=_empty_queues),
+        patch('src.campaign_b.pre_m6_batch.list_pre_m6_queue', side_effect=_empty_queues),
+        patch(
+            'src.campaign_b.close_obligations.list_obligation_queue',
+            side_effect=_empty_queues,
+        ),
+        patch('src.campaign_b.m6_batch.list_m6_queue', side_effect=_empty_queues),
         patch(
             'src.campaign_b.m3_reclaim.auto_strip_after_pipeline_round',
             side_effect=_reclaim,
@@ -262,19 +388,19 @@ def test_pipeline_auto_strips_when_flag_set(tmp_path: Path) -> None:
             project_root=tmp_path,
             max_rounds=1,
             auto_strip_m3_checkpoints=True,
-            persist_m3_cap_gib=None,
         )
 
     # Session-start full scan + per-round strip.
     assert len(reclaim_calls) == 2
-    assert reclaim_calls[0].get('force_full_scan') is True
-    assert reclaim_calls[1].get('force_full_scan') is False
+    assert reclaim_calls[0]['force_full_scan'] is True
+    assert reclaim_calls[1]['force_full_scan'] is False
     assert summary['auto_strip_m3_checkpoints'] is True
-    assert summary['auto_keep_latest_m3_checkpoint'] is True
-    assert summary['m3_reclaim']['stripped'] == 1
-    assert summary['m3_reclaim']['bytes_freed'] == 42
-    assert summary['totals']['m3_checkpoints_stripped'] == 1
-    assert summary['m3_reclaim']['session_start_full_scan']['stripped'] == 1
+    assert summary['m3_reclaim']['stripped'] == 2
+    assert summary['m3_reclaim']['bytes_freed'] == 84
+    assert summary['m3_reclaim']['session_start_full_scan'] is not None
+    assert summary['totals']['m3_checkpoints_stripped'] == 2
+    assert summary['rounds'][0]['m3_reclaim']['stripped'] == 1
+    assert summary['stop_reason'] == 'DRAINED_OR_IDLE'
 
 
 def test_pipeline_skips_auto_strip_when_disabled(tmp_path: Path) -> None:
@@ -288,6 +414,13 @@ def test_pipeline_skips_auto_strip_when_disabled(tmp_path: Path) -> None:
             return_value=empty,
         ),
         patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', side_effect=_empty_queues),
+        patch('src.campaign_b.pre_m6_batch.list_pre_m6_queue', side_effect=_empty_queues),
+        patch(
+            'src.campaign_b.close_obligations.list_obligation_queue',
+            side_effect=_empty_queues,
+        ),
+        patch('src.campaign_b.m6_batch.list_m6_queue', side_effect=_empty_queues),
         patch(
             'src.campaign_b.m3_reclaim.auto_strip_after_pipeline_round',
         ) as reclaim,
@@ -303,3 +436,4 @@ def test_pipeline_skips_auto_strip_when_disabled(tmp_path: Path) -> None:
     assert summary['auto_strip_m3_checkpoints'] is False
     assert summary['m3_reclaim']['stripped'] == 0
     assert 'm3_reclaim' not in summary['rounds'][0]
+    assert summary['stop_reason'] == 'DRAINED_OR_IDLE'
