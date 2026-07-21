@@ -315,6 +315,9 @@ src/m5_orchestrator.py
 3. **任意:** 単独で Notebook **96**（統合スケジューラ）。throttle は必須ではない。
 4. **禁止:** 96∥97 を両方フル GPU consumer として起動しない。
    `campaign_b/_locks/gpu_lane.json` が第二側を `GpuLaneHeldError` で止める。
+   97 drain は `owner=pipeline_to_m6` のみ（outer `notebook_97_post_m2` なし）。
+   死んだ PID の lease 回収:
+   `python scripts/release_gpu_lane_lease.py --force-if-dead`。
 5. 既存 `READY_FOR_M3` / binding READY は `M2_READY` 待ちなしで M3→M6 へ進む。
 6. Notebook 98 は別 kernel で必要時に（読み取り専用）。
 7. Notebook 99 で CERTIFIED を永続カタログへマージする。

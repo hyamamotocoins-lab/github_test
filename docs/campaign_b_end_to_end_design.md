@@ -89,6 +89,25 @@ disable_session_wallclock: true
 - `execution_keys` — **排他 GPU lease**（heartbeat + pid/hostname）。
   死んだ PID または古い heartbeat は acquire 時に reclaim。
   生存プロセスの lease は奪わない（`GpuLaneHeldError`）。
+- Notebook 97 drain path（default）は outer lease を取らず、
+  `run_pipeline_to_m6` の `owner=pipeline_to_m6` のみ。interrupted 時の
+  lease owner 表示が pipeline と一致する。
+- Ops reclaim（Paperspace, repo root）::
+
+  ```bash
+  export VALIDATED_RG_PERSIST_ROOT=/storage/validated_4d_su2_rg
+  cat "$VALIDATED_RG_PERSIST_ROOT/campaign_b/_locks/gpu_lane.json"
+  # 例: pid=13712
+  ps -p 13712 -o pid,ppid,etime,cmd || echo 'PID dead'
+  python scripts/release_gpu_lane_lease.py --status
+  # PID が死んでいるときだけ:
+  python scripts/release_gpu_lane_lease.py --force-if-dead
+  # 危険（生存プロセスを奪う）:
+  # python scripts/release_gpu_lane_lease.py --force --i-understand
+  ```
+
+  手動: PID 死亡確認後のみ
+  `rm "$VALIDATED_RG_PERSIST_ROOT/campaign_b/_locks/gpu_lane.json"`。
 
 ## 7. 不変条件
 

@@ -138,7 +138,10 @@ def test_post_m2_defaults_drain_via_pipeline_to_m6(tmp_path: Path) -> None:
     assert '95-equivalent' in summary['note']
     assert 'backlog growth is OK' in summary['note']
     assert 'Auto-strip M3 checkpoints ON' in summary['note']
+    assert 'pipeline_to_m6' in summary['note']
     assert summary['certification_status'] == CERTIFICATION_STATUS
+    # Drain path must not take an outer notebook_97 lease (pipeline owns it).
+    assert not (tmp_path / 'campaign_b' / '_locks' / 'gpu_lane.json').exists()
     ledger = tmp_path / 'campaign_b' / '_post_m2' / 'LATEST_POST_M2_SESSION.json'
     assert ledger.is_file()
 

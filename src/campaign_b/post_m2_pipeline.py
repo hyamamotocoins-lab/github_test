@@ -128,6 +128,10 @@ def run_post_m2_pipeline(
     Recommended ops: notebook 89 (producer) ∥ this consumer. Backlog growth is OK.
     Exclusive GPU lane lease under campaign_b/_locks/gpu_lane.json — do not run
     concurrently with notebook 96 (second consumer fails closed).
+
+    Drain path (default): no outer lease — ``run_pipeline_to_m6`` owns
+    ``owner=pipeline_to_m6``. End-to-end path: outer lease
+    ``owner=notebook_97_post_m2`` (covers strip + e2e).
     """
     from .execution_keys import gpu_lane_lease
 
@@ -158,97 +162,98 @@ def run_post_m2_pipeline(
 
     m2_ready = find_m2_ready_markers(cfg.persistent_root)
 
-    with gpu_lane_lease(cfg.persistent_root, owner='notebook_97_post_m2'):
-        if cfg.drain_existing_backlog:
-            from .pipeline_to_m6 import run_pipeline_to_m6
+    if cfg.drain_existing_backlog:
+        from .pipeline_to_m6 import run_pipeline_to_m6
 
-            # 95-equivalent consumer: advance first, then GPU M3→M6.
-            # Nested lease with pipeline_to_m6 is intentional.
-            inner = run_pipeline_to_m6(
-                persistent_root=cfg.persistent_root,
-                project_root=cfg.project_root,
-                max_rounds=cfg.max_rounds,
-                max_advance=cfg.max_advance,
-                max_m3_sessions=cfg.max_m3_sessions,
-                max_pre_m6_packages=cfg.max_pre_m6_packages,
-                max_stage_sessions=cfg.max_stage_sessions,
-                max_obligation_packages=cfg.max_obligation_packages,
-                max_m6_packages=cfg.max_m6_packages,
-                max_queue=cfg.max_queue,
-                only_campaign_run_id=cfg.only_campaign_run_id,
-                auto_strip_m3_checkpoints=cfg.auto_strip_m3_checkpoints,
-                persist_m3_cap_gib=cfg.persist_m3_cap_gib,
-                auto_keep_latest_m3_checkpoint=cfg.auto_keep_latest_m3_checkpoint,
+        # 95-equivalent consumer: advance first, then GPU M3→M6.
+        # Lease is owned solely by run_pipeline_to_m6 (owner=pipeline_to_m6).
+        inner = run_pipeline_to_m6(
+            persistent_root=cfg.persistent_root,
+            project_root=cfg.project_root,
+            max_rounds=cfg.max_rounds,
+            max_advance=cfg.max_advance,
+            max_m3_sessions=cfg.max_m3_sessions,
+            max_pre_m6_packages=cfg.max_pre_m6_packages,
+            max_stage_sessions=cfg.max_stage_sessions,
+            max_obligation_packages=cfg.max_obligation_packages,
+            max_m6_packages=cfg.max_m6_packages,
+            max_queue=cfg.max_queue,
+            only_campaign_run_id=cfg.only_campaign_run_id,
+            auto_strip_m3_checkpoints=cfg.auto_strip_m3_checkpoints,
+            persist_m3_cap_gib=cfg.persist_m3_cap_gib,
+            auto_keep_latest_m3_checkpoint=cfg.auto_keep_latest_m3_checkpoint,
+        )
+        mode = 'drain_existing_backlog'
+        inner_key = 'pipeline_to_m6'
+        m3_reclaim = inner.get('m3_reclaim') or {}
+        stop_reason = inner.get('stop_reason')
+        remaining = inner.get('remaining_runnable') or {}
+        inner_summary = {
+            'session_id': inner.get('session_id'),
+            'rounds_run': inner.get('rounds_run'),
+            'stop_reason': stop_reason,
+            'remaining_runnable': remaining,
+            'totals': inner.get('totals'),
+            'auto_strip_m3_checkpoints': inner.get('auto_strip_m3_checkpoints'),
+            'auto_keep_latest_m3_checkpoint': inner.get(
+                'auto_keep_latest_m3_checkpoint',
+            ),
+            'persist_m3_cap_gib': inner.get('persist_m3_cap_gib'),
+            'm3_reclaim': m3_reclaim,
+        }
+        note = (
+            'Notebook 97 post-M2 consumer (95-equivalent). '
+            'Run alongside notebook 89 (producer); backlog growth is OK. '
+            'Drains SELECTED / READY_FOR_M3 / m2_binding-READY through '
+            'advance → M3 → M6. Screening off by default. '
+            'M2_READY markers are informational only (not a wait gate). '
+            f'stop_reason={stop_reason}; re-run cell 3 after stop to resume. '
+            'GPU lane lease held by pipeline_to_m6; do not run concurrently '
+            'with notebook 96. '
+            + (
+                f"Auto-strip M3 checkpoints ON "
+                f"(stripped={m3_reclaim.get('stripped', 0)}, "
+                f"freed≈{m3_reclaim.get('bytes_freed_human', '0 B')}). "
+                if cfg.auto_strip_m3_checkpoints
+                else 'Auto-strip M3 checkpoints OFF. '
             )
-            mode = 'drain_existing_backlog'
-            inner_key = 'pipeline_to_m6'
-            m3_reclaim = inner.get('m3_reclaim') or {}
-            stop_reason = inner.get('stop_reason')
-            remaining = inner.get('remaining_runnable') or {}
-            inner_summary = {
-                'session_id': inner.get('session_id'),
-                'rounds_run': inner.get('rounds_run'),
-                'stop_reason': stop_reason,
-                'remaining_runnable': remaining,
-                'totals': inner.get('totals'),
-                'auto_strip_m3_checkpoints': inner.get('auto_strip_m3_checkpoints'),
-                'auto_keep_latest_m3_checkpoint': inner.get(
-                    'auto_keep_latest_m3_checkpoint',
-                ),
-                'persist_m3_cap_gib': inner.get('persist_m3_cap_gib'),
-                'm3_reclaim': m3_reclaim,
-            }
-            note = (
-                'Notebook 97 post-M2 consumer (95-equivalent). '
-                'Run alongside notebook 89 (producer); backlog growth is OK. '
-                'Drains SELECTED / READY_FOR_M3 / m2_binding-READY through '
-                'advance → M3 → M6. Screening off by default. '
-                'M2_READY markers are informational only (not a wait gate). '
-                f'stop_reason={stop_reason}; re-run cell 3 after stop to resume. '
-                'GPU lane lease held; do not run concurrently with notebook 96. '
-                + (
-                    f"Auto-strip M3 checkpoints ON "
-                    f"(stripped={m3_reclaim.get('stripped', 0)}, "
-                    f"freed≈{m3_reclaim.get('bytes_freed_human', '0 B')}). "
-                    if cfg.auto_strip_m3_checkpoints
-                    else 'Auto-strip M3 checkpoints OFF. '
-                )
-                + (
-                    f"Keep-latest ON "
-                    f"(freed≈{m3_reclaim.get('keep_latest_bytes_freed_human', '0 B')}). "
-                    if cfg.auto_keep_latest_m3_checkpoint
-                    else 'Keep-latest OFF. '
-                )
-                + 'NOT_CERTIFIED / SCREENING_ONLY.'
+            + (
+                f"Keep-latest ON "
+                f"(freed≈{m3_reclaim.get('keep_latest_bytes_freed_human', '0 B')}). "
+                if cfg.auto_keep_latest_m3_checkpoint
+                else 'Keep-latest OFF. '
             )
-        else:
-            from .end_to_end import EndToEndConfig, run_end_to_end
-            from .m3_reclaim import (
-                enforce_persist_m3_cap,
-                strip_eligible_m3_checkpoints,
-            )
+            + 'NOT_CERTIFIED / SCREENING_ONLY.'
+        )
+    else:
+        from .end_to_end import EndToEndConfig, run_end_to_end
+        from .m3_reclaim import (
+            enforce_persist_m3_cap,
+            strip_eligible_m3_checkpoints,
+        )
 
-            e2e = EndToEndConfig(
-                persistent_root=cfg.persistent_root,
-                project_root=cfg.project_root,
-                selected_backlog_target=cfg.selected_backlog_target,
-                screening_chunk_size=cfg.screening_chunk_size,
-                max_rounds=cfg.max_rounds,
-                max_m3_sessions=cfg.max_m3_sessions,
-                max_pre_m6_packages=cfg.max_pre_m6_packages,
-                max_stage_sessions=cfg.max_stage_sessions,
-                max_obligation_packages=cfg.max_obligation_packages,
-                max_m6_packages=cfg.max_m6_packages,
-                max_queue=cfg.max_queue,
-                max_advance=cfg.max_advance,
-                only_campaign_run_id=cfg.only_campaign_run_id,
-                skip_screening=cfg.skip_screening,
-                disable_session_wallclock=cfg.disable_session_wallclock,
-            )
-            # Nested lease with end_to_end acquire_gpu_lock is intentional.
+        e2e = EndToEndConfig(
+            persistent_root=cfg.persistent_root,
+            project_root=cfg.project_root,
+            selected_backlog_target=cfg.selected_backlog_target,
+            screening_chunk_size=cfg.screening_chunk_size,
+            max_rounds=cfg.max_rounds,
+            max_m3_sessions=cfg.max_m3_sessions,
+            max_pre_m6_packages=cfg.max_pre_m6_packages,
+            max_stage_sessions=cfg.max_stage_sessions,
+            max_obligation_packages=cfg.max_obligation_packages,
+            max_m6_packages=cfg.max_m6_packages,
+            max_queue=cfg.max_queue,
+            max_advance=cfg.max_advance,
+            only_campaign_run_id=cfg.only_campaign_run_id,
+            skip_screening=cfg.skip_screening,
+            disable_session_wallclock=cfg.disable_session_wallclock,
+        )
+        with gpu_lane_lease(cfg.persistent_root, owner='notebook_97_post_m2'):
+            # Outer lease covers strip + e2e (e2e may nest same-PID).
             # Session-start full strip before e2e so backlog reclaim is not
             # gated on this loop producing PRE_M6_READY.
-            m3_reclaim: dict[str, Any] = {}
+            m3_reclaim = {}
             if cfg.auto_strip_m3_checkpoints:
                 m3_reclaim = strip_eligible_m3_checkpoints(
                     cfg.persistent_root, execute=True,
@@ -262,27 +267,27 @@ def run_post_m2_pipeline(
                     )
                     m3_reclaim['persist_cap'] = cap
             inner = run_end_to_end(e2e)
-            mode = 'end_to_end'
-            inner_key = 'end_to_end'
-            inner_summary = {
-                'session_id': inner.get('session_id'),
-                'rounds_run': inner.get('rounds_run'),
-                'totals': inner.get('totals'),
-                'm3_reclaim': m3_reclaim,
-            }
-            note = (
-                'Notebook 97 post-M2 pipeline (opt-in end_to_end path). '
-                'Prefer 89∥97 producer-consumer; backlog growth is OK. '
-                'GPU lane lease held; do not run concurrently with notebook 96. '
-                + (
-                    f"Auto-strip M3 checkpoints ON "
-                    f"(stripped={m3_reclaim.get('stripped', 0)}, "
-                    f"freed≈{m3_reclaim.get('bytes_freed_human', '0 B')}). "
-                    if cfg.auto_strip_m3_checkpoints
-                    else 'Auto-strip M3 checkpoints OFF. '
-                )
-                + 'NOT_CERTIFIED / SCREENING_ONLY.'
+        mode = 'end_to_end'
+        inner_key = 'end_to_end'
+        inner_summary = {
+            'session_id': inner.get('session_id'),
+            'rounds_run': inner.get('rounds_run'),
+            'totals': inner.get('totals'),
+            'm3_reclaim': m3_reclaim,
+        }
+        note = (
+            'Notebook 97 post-M2 pipeline (opt-in end_to_end path). '
+            'Prefer 89∥97 producer-consumer; backlog growth is OK. '
+            'GPU lane lease held; do not run concurrently with notebook 96. '
+            + (
+                f"Auto-strip M3 checkpoints ON "
+                f"(stripped={m3_reclaim.get('stripped', 0)}, "
+                f"freed≈{m3_reclaim.get('bytes_freed_human', '0 B')}). "
+                if cfg.auto_strip_m3_checkpoints
+                else 'Auto-strip M3 checkpoints OFF. '
             )
+            + 'NOT_CERTIFIED / SCREENING_ONLY.'
+        )
 
     summary = {
         'schema_version': 1,
