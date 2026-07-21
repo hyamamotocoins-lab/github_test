@@ -1,18 +1,19 @@
 # Campaign B パイプライン処理仕様（Notebook 89 / 95）
 
-> **後継:** Phase 1 では Notebook **96** の backlog-aware 統合スケジューラが
-> 89/95 二重ループを置換する。設計は
-> [campaign_b_end_to_end_design.md](./campaign_b_end_to_end_design.md)。
-> 分割レーン（97/98）は
-> [campaign_b_parallel_split_design.md](./campaign_b_parallel_split_design.md)。
-> M6 CERTIFIED 永続カタログは Notebook **99**。
+> **推奨運用（現行）:** **89∥97**（旧 89∥95 と同じ producer/consumer）。  
+> 待ち行列が増えてもよい。Notebook **96** は任意の単一ノート統合モード。  
+> 設計: [campaign_b_parallel_split_design.md](./campaign_b_parallel_split_design.md)、  
+> 96 詳細: [campaign_b_end_to_end_design.md](./campaign_b_end_to_end_design.md)。  
+> 監視: **98** status、**99** CERTIFIED カタログ。  
+> GPU: `{PERSIST}/campaign_b/_locks/gpu_lane.json`（96∥97 同時フル起動は fail closed）。
 
-Paperspace 上で Notebook **89**（mass explore）と **95**（pipeline_to_m6）を運用するときの、**各ステージが実際に何を計算・読み書きするか**の技術仕様。要約ではなく、コード上の処理ステップに沿って記述する。
+Paperspace 上で Notebook **89**（mass explore）と **95**（pipeline_to_m6；現行推奨 consumer は **97**）を運用するときの、**各ステージが実際に何を計算・読み書きするか**の技術仕様。要約ではなく、コード上の処理ステップに沿って記述する。
 
 | ノート | エントリ | 実装 |
 |---|---|---|
 | 89 | `notebooks/89_campaign_b_mass_explore.ipynb` | `src/campaign_b/mass_explore.py` → `driver.py` |
 | 95 | `notebooks/95_campaign_b_pipeline_to_m6.ipynb` | `src/campaign_b/pipeline_to_m6.py`（90→94 を直列呼出） |
+| 97 | `notebooks/97_campaign_b_post_m2_pipeline.ipynb` | `post_m2_pipeline.py` → 既定で `pipeline_to_m6`（95 相当） |
 
 関連モジュール（95 が内部で呼ぶ段）:
 
@@ -582,15 +583,17 @@ advance → gpu_m3 → pre_m6 → obligations → m6
 
 ---
 
-## 10. 運用ノート（89 ∥ 95）
+## 10. 運用ノート（89 ∥ 95 / 推奨 89 ∥ 97）
 
-- **並行可:** 89 は SELECTED を生産、95 は消費。同一 GPU を 89 が使わない前提（89 は主に CPU screening；canonical M2 生成時は GPU を奪い得る点に注意）。
+- **推奨:** 89∥**97**（95 と同じ思想の改良 consumer）。待ち行列が増えてもよい。
+- **並行可:** 89 は SELECTED を生産、95/97 は消費。同一 GPU を 89 が使わない前提（89 は主に CPU screening；canonical M2 生成時は GPU を奪い得る点に注意）。
+- **96:** 任意の単一ノート。throttle は必須ではない。**96∥97 同時フル GPU は不可**（GPU lane lease）。
 - **バックログ動態:**
-  - 89 の wave が SELECTED を増やす → 95 の次ラウンド `advance` が拾う。
+  - 89 の wave が SELECTED を増やす → 95/97 の次ラウンド `advance` が拾う。
   - M3 が `M3_CHECKPOINT` で戻ると progress > 0 のためラウンド継続；時間予算で何度も resume。
   - M4 も同様に `m4_checkpoint` が progress に入る。
   - progress=0 で停止したら、89 側の新規 SELECTED 待ちか、全キューが blocked（bad M2 / 義務 open / M6 未準備）か。
-- **単一 GPU:** 95 内の M3→M4 は逐次。グローバル audit 書換のため pre_m6 も「同時 1 パッケージ」設計。
+- **単一 GPU:** 95/97 内の M3→M4 は逐次。lease は `campaign_b/_locks/gpu_lane.json`。
 - **j2 の二層:** screening 候補の `j2∈{2,3,4}` はスキーム探索軸。実行系 M2/M3 のカットオフは shared M2 の `j2_max`（通常 2）に固定。高 j2 候補でも M3 次元は親 M2 に従う。
 - **タイミング:** 1 M3 セッションが 6h 枠に収まる設計。j2=2・rank 大の RSVD 実時間はマシン依存 → `[要確認]` Paperspace GPU 実測で更新すること。
 - **再実行:** 各段はパッケージ内 status JSON と `runs/` チェックポイントで resume。`force` は advance のみ明示フラグ。

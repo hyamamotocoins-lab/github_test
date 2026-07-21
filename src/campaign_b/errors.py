@@ -21,3 +21,7 @@ class TimeBudgetClosed(RuntimeError):
 
 class InvariantViolation(CampaignFatalError):
     """Certification / staged-only / M6 / Campaign C invariant broken."""
+
+
+class GpuLaneHeldError(CampaignFatalError):
+    """GPU lane lease held by another live process; fail closed (do not steal)."""

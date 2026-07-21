@@ -2,31 +2,34 @@
 
 ## 1. 結論
 
-Paperspace 上の **89 / 95 二重ループ**を、単一ノート **96** の
-**backlog-aware scheduler** に置き換える。
+Notebook **96** は **任意の単一ノート統合スケジューラ**（backlog-aware）。
+**推奨の運用は 89∥97**（旧 89∥95 と同じ producer/consumer）。待ち行列が増えてもよい。
+96 の backlog throttle を主運用にしない。
 
 | ノート | 役割 |
 |---|---|
-| **96** | 統合スケジューラ（本設計・Phase 1） |
-| 97 | 分割レーンの post-M2 pipeline（補完オプション） |
-| 98 | 読み取り専用ダッシュボード（補完オプション） |
-| 99 | M6 `CERTIFIED` 永続カタログ |
+| **89** | screening / mass-explore **producer**（推奨） |
+| **97** | post-M2 **consumer**（95 相当；推奨、89 と並走可） |
+| **96** | 統合スケジューラ（**任意**；単独利用 OK） |
+| **98** | 読み取り専用ダッシュボード |
+| **99** | M6 `CERTIFIED` 永続カタログ |
 
 関連ドキュメント:
 
 - [campaign_b_parallel_split_design.md](./campaign_b_parallel_split_design.md)
-  — 96/97/98 分割レーン案（Downloads 由来）。**Phase 1 は本設計の単一ノート 96 を採用。**
-  分割レーンは将来オプションとして残す。
+  — 89∥97 推奨と GPU lane lease。
 - [campaign_b_pipeline_89_95.md](./campaign_b_pipeline_89_95.md)
-  — 現行 89/95 の処理仕様（参照用）。
+  — 89/95 処理仕様（97 が 95 後継 consumer）。
 
-## 2. Phase 1 スコープ
+## 2. Phase 1 スコープ（96 実装）
 
 - **M3 数学・backend は変更しない**（既存 `run_gpu_m3_batch` 等を再利用）。
 - `m3_backend` フィールドは YAML に `legacy_rsvd` デフォルトで置けるが **Phase 2 まで無視**。
 - セッション壁時計: `VALIDATED_RG_DISABLE_SESSION_WALLCLOCK=1`
   （`src/session_guard.py`）。アイテム級 checkpoint / fail-closed は維持。
 - 永続スナップショット: `{PERSIST}/campaign_b/_end_to_end/`。
+- GPU lane lease: `{PERSIST}/campaign_b/_locks/gpu_lane.json`
+  （96 / 97 / `pipeline_to_m6` が取得。別プロセスが保持中なら fail closed）。
 
 ## 3. ループ順序
 
@@ -34,9 +37,10 @@ Paperspace 上の **89 / 95 二重ループ**を、単一ノート **96** の
 
 1. **M3 / downstream を先に実行**  
    `run_gpu_m3_batch` → `run_pre_m6_batch` → `run_close_obligations_batch` → `run_m6_batch`
-2. **バックログゲート**  
+2. **バックログゲート（96 専用オプション）**  
    `len(list_gpu_m3_queue(...)) < selected_backlog_target`（既定 8）のときだけ  
-   screening chunk + `run_advance_selected`
+   screening chunk + `run_advance_selected`  
+   ※ 89∥97 運用ではこの throttle は使わない（backlog 増は許容）。
 3. progress == 0 なら停止（idle）
 
 ### progress の定義（完了のみ）
@@ -50,7 +54,7 @@ Paperspace 上の **89 / 95 二重ループ**を、単一ノート **96** の
 - `advanced`
 - screening で得た `selected`（wave の selected_count）
 
-（95 の pipeline は resume 用に checkpoint も progress 扱いだが、96 Phase 1 は完了ベース。）
+（95/97 の pipeline は resume 用に checkpoint も progress 扱いだが、96 は完了ベース。）
 
 ## 4. Screening chunk
 
@@ -79,10 +83,12 @@ mass_explore_config: campaign_b_mass_explore.yaml
 disable_session_wallclock: true
 ```
 
-## 6. 回復・実行キー（最小）
+## 6. 回復・GPU lane lease
 
 - `pipeline_recovery.recover_interrupted_work` — `*.tmp` 掃除、stale lease ディレクトリ stub
-- `execution_keys` — Phase 2+ 用 stub（GPU lock / shared M3 key）
+- `execution_keys` — **排他 GPU lease**（heartbeat + pid/hostname）。
+  死んだ PID または古い heartbeat は acquire 時に reclaim。
+  生存プロセスの lease は奪わない（`GpuLaneHeldError`）。
 
 ## 7. 不変条件
 
@@ -91,15 +97,18 @@ disable_session_wallclock: true
   M6 で `CERTIFIED` を出しても continuum 主張禁止）
 - production paperspace gate 81 は起動しない
 - CERTIFIED を捏造しない（検出は notebook 99）
+- **96∥97 をフル GPU consumer として同時起動しない**（lease が第二側を fail closed）
 
-## 8. Paperspace 運用（Phase 1）
+## 8. Paperspace 運用（推奨）
 
 1. main を pull
-2. Notebook **96** を実行（CUDA 必須）
-3. 必要なら **98** で状態確認、**99** で CERTIFIED カタログ更新
-4. 分割レーン（97）は M2 並行構築が必要なときのみ
+2. **推奨:** Notebook **89**（CPU/screening）∥ **97**（CUDA consumer）
+3. 待ち行列（SELECTED / READY_FOR_M3）が増えてもよい。M2 が先に終わってもよい。
+4. **任意:** 単独で **96** を使う（統合スケジューラ）。throttle は必須ではない。
+5. **98** で状態確認、**99** で CERTIFIED カタログ更新
+6. 誤って 96 と 97 を両方フル起動した場合、後から lease を取れない側が明確にエラーする
 
-## 9. 後続フェーズ（非 Phase 1）
+## 9. 後続フェーズ
 
-- Phase 2: `m3_backend` 切替、execution_keys 実体化
-- 分割レーン全面採用時は parallel_split 設計の Lane A–D へ移行
+- Phase 2: `m3_backend` 切替、execution key の更なる細分化
+- 分割レーン全面採用時は parallel_split 設計の Lane A–D へ

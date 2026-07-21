@@ -106,8 +106,12 @@ def run_post_m2_pipeline(
     When ``drain_existing_backlog=False``: Phase-1 ``run_end_to_end`` loop
     (M3-first, optional screening when backlog thin).
 
-    Single GPU: do not start parallel M3 workers. Do not run concurrently with 96.
+    Recommended ops: notebook 89 (producer) ∥ this consumer. Backlog growth is OK.
+    Exclusive GPU lane lease under campaign_b/_locks/gpu_lane.json — do not run
+    concurrently with notebook 96 (second consumer fails closed).
     """
+    from .execution_keys import gpu_lane_lease
+
     cfg = PostM2Config(
         persistent_root=Path(persistent_root),
         project_root=Path(project_root),
@@ -132,73 +136,76 @@ def run_post_m2_pipeline(
 
     m2_ready = find_m2_ready_markers(cfg.persistent_root)
 
-    if cfg.drain_existing_backlog:
-        from .pipeline_to_m6 import run_pipeline_to_m6
+    with gpu_lane_lease(cfg.persistent_root, owner='notebook_97_post_m2'):
+        if cfg.drain_existing_backlog:
+            from .pipeline_to_m6 import run_pipeline_to_m6
 
-        # 95-equivalent consumer: advance first, then GPU M3→M6.
-        # Screening stays off unless the caller opts into the e2e path.
-        inner = run_pipeline_to_m6(
-            persistent_root=cfg.persistent_root,
-            project_root=cfg.project_root,
-            max_rounds=cfg.max_rounds,
-            max_advance=cfg.max_advance,
-            max_m3_sessions=cfg.max_m3_sessions,
-            max_pre_m6_packages=cfg.max_pre_m6_packages,
-            max_stage_sessions=cfg.max_stage_sessions,
-            max_obligation_packages=cfg.max_obligation_packages,
-            max_m6_packages=cfg.max_m6_packages,
-            max_queue=cfg.max_queue,
-            only_campaign_run_id=cfg.only_campaign_run_id,
-        )
-        mode = 'drain_existing_backlog'
-        inner_key = 'pipeline_to_m6'
-        inner_summary = {
-            'session_id': inner.get('session_id'),
-            'rounds_run': inner.get('rounds_run'),
-            'totals': inner.get('totals'),
-        }
-        note = (
-            'Notebook 97 post-M2 consumer (95-equivalent). '
-            'Drains SELECTED / READY_FOR_M3 / m2_binding-READY through '
-            'advance → M3 → M6. Screening off by default. '
-            'M2_READY markers are informational only (not a wait gate). '
-            'Do not run concurrently with notebook 96. '
-            'NOT_CERTIFIED / SCREENING_ONLY.'
-        )
-    else:
-        from .end_to_end import EndToEndConfig, run_end_to_end
+            # 95-equivalent consumer: advance first, then GPU M3→M6.
+            # Nested lease with pipeline_to_m6 is intentional.
+            inner = run_pipeline_to_m6(
+                persistent_root=cfg.persistent_root,
+                project_root=cfg.project_root,
+                max_rounds=cfg.max_rounds,
+                max_advance=cfg.max_advance,
+                max_m3_sessions=cfg.max_m3_sessions,
+                max_pre_m6_packages=cfg.max_pre_m6_packages,
+                max_stage_sessions=cfg.max_stage_sessions,
+                max_obligation_packages=cfg.max_obligation_packages,
+                max_m6_packages=cfg.max_m6_packages,
+                max_queue=cfg.max_queue,
+                only_campaign_run_id=cfg.only_campaign_run_id,
+            )
+            mode = 'drain_existing_backlog'
+            inner_key = 'pipeline_to_m6'
+            inner_summary = {
+                'session_id': inner.get('session_id'),
+                'rounds_run': inner.get('rounds_run'),
+                'totals': inner.get('totals'),
+            }
+            note = (
+                'Notebook 97 post-M2 consumer (95-equivalent). '
+                'Run alongside notebook 89 (producer); backlog growth is OK. '
+                'Drains SELECTED / READY_FOR_M3 / m2_binding-READY through '
+                'advance → M3 → M6. Screening off by default. '
+                'M2_READY markers are informational only (not a wait gate). '
+                'GPU lane lease held; do not run concurrently with notebook 96. '
+                'NOT_CERTIFIED / SCREENING_ONLY.'
+            )
+        else:
+            from .end_to_end import EndToEndConfig, run_end_to_end
 
-        e2e = EndToEndConfig(
-            persistent_root=cfg.persistent_root,
-            project_root=cfg.project_root,
-            selected_backlog_target=cfg.selected_backlog_target,
-            screening_chunk_size=cfg.screening_chunk_size,
-            max_rounds=cfg.max_rounds,
-            max_m3_sessions=cfg.max_m3_sessions,
-            max_pre_m6_packages=cfg.max_pre_m6_packages,
-            max_stage_sessions=cfg.max_stage_sessions,
-            max_obligation_packages=cfg.max_obligation_packages,
-            max_m6_packages=cfg.max_m6_packages,
-            max_queue=cfg.max_queue,
-            max_advance=cfg.max_advance,
-            only_campaign_run_id=cfg.only_campaign_run_id,
-            skip_screening=cfg.skip_screening,
-            disable_session_wallclock=cfg.disable_session_wallclock,
-        )
-        inner = run_end_to_end(e2e)
-        mode = 'end_to_end'
-        inner_key = 'end_to_end'
-        inner_summary = {
-            'session_id': inner.get('session_id'),
-            'rounds_run': inner.get('rounds_run'),
-            'totals': inner.get('totals'),
-        }
-        note = (
-            'Notebook 97 post-M2 pipeline (parallel-split Lane B–D via end_to_end). '
-            'Single GPU. Reuses Phase-1 backlog-aware loop. '
-            'Do not run concurrently with notebook 96. '
-            'NOT_CERTIFIED / SCREENING_ONLY.'
-        )
+            e2e = EndToEndConfig(
+                persistent_root=cfg.persistent_root,
+                project_root=cfg.project_root,
+                selected_backlog_target=cfg.selected_backlog_target,
+                screening_chunk_size=cfg.screening_chunk_size,
+                max_rounds=cfg.max_rounds,
+                max_m3_sessions=cfg.max_m3_sessions,
+                max_pre_m6_packages=cfg.max_pre_m6_packages,
+                max_stage_sessions=cfg.max_stage_sessions,
+                max_obligation_packages=cfg.max_obligation_packages,
+                max_m6_packages=cfg.max_m6_packages,
+                max_queue=cfg.max_queue,
+                max_advance=cfg.max_advance,
+                only_campaign_run_id=cfg.only_campaign_run_id,
+                skip_screening=cfg.skip_screening,
+                disable_session_wallclock=cfg.disable_session_wallclock,
+            )
+            # Nested lease with end_to_end acquire_gpu_lock is intentional.
+            inner = run_end_to_end(e2e)
+            mode = 'end_to_end'
+            inner_key = 'end_to_end'
+            inner_summary = {
+                'session_id': inner.get('session_id'),
+                'rounds_run': inner.get('rounds_run'),
+                'totals': inner.get('totals'),
+            }
+            note = (
+                'Notebook 97 post-M2 pipeline (opt-in end_to_end path). '
+                'Prefer 89∥97 producer-consumer; backlog growth is OK. '
+                'GPU lane lease held; do not run concurrently with notebook 96. '
+                'NOT_CERTIFIED / SCREENING_ONLY.'
+            )
 
     summary = {
         'schema_version': 1,

@@ -3,6 +3,7 @@
 from .errors import (
     CampaignFatalError,
     CandidateRejected,
+    GpuLaneHeldError,
     NeedCanonicalM2,
     TimeBudgetClosed,
 )
@@ -11,6 +12,7 @@ __all__ = [
     'CampaignBConfig',
     'CampaignFatalError',
     'CandidateRejected',
+    'GpuLaneHeldError',
     'NeedCanonicalM2',
     'TimeBudgetClosed',
     'load_campaign_b_config',

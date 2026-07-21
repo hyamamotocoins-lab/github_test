@@ -97,6 +97,7 @@ def test_post_m2_defaults_drain_via_pipeline_to_m6(tmp_path: Path) -> None:
     assert summary['pipeline_to_m6']['totals']['m3_complete'] == 3
     assert 'end_to_end' not in summary
     assert '95-equivalent' in summary['note']
+    assert 'backlog growth is OK' in summary['note']
     assert summary['certification_status'] == CERTIFICATION_STATUS
     ledger = tmp_path / 'campaign_b' / '_post_m2' / 'LATEST_POST_M2_SESSION.json'
     assert ledger.is_file()

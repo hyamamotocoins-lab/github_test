@@ -6,17 +6,21 @@
 >
 > | ノート | 役割 |
 > |---|---|
-> | **96** | 統合 backlog-aware end-to-end（[campaign_b_end_to_end_design.md](./campaign_b_end_to_end_design.md)）— **Phase 1 の主経路** |
-> | **97** | post-M2 pipeline（本設計の Lane B–D） |
+> | **89** | mass-explore **producer**（推奨・並走可） |
+> | **97** | post-M2 **consumer**（95 相当；**推奨**、89∥97） |
+> | **96** | 統合 backlog-aware end-to-end（**任意**の単一ノート） |
 > | **98** | 読み取り専用 status dashboard |
 > | **99** | M6 CERTIFIED 永続カタログ |
 >
 > 原案の「96 = M2 shared build」は **未採番の将来レーン**（`m2_shared_batch`）として残す。  
-> Phase 1 は単一ノート 96 を優先し、本ドキュメントの分割は補完オプション。
+> **推奨 ops = 89∥97**（旧 89∥95）。待ち行列が増えてもよい。96 の throttle を主運用にしない。
 
 ## 1. 結論
 
-安全な構成は、次の三レーン構成とする（番号は上表）。
+**推奨:** Notebook **89**（producer）∥ **97**（consumer）。  
+backlog（SELECTED / READY_FOR_M3）の成長は許容する。M2 が先に終わってもよい。
+
+安全なレーン構成:
 
 1. （将来）canonical shared M2 builder
    - sector 単位で checkpoint する。
@@ -28,13 +32,13 @@
      `drain_existing_backlog=True` / `skip_screening=True`。
    - `M2_READY.json` は検出のみ（待機ゲートではない）。
    - opt-in: `drain_existing_backlog=False` で Phase-1 end_to_end
-     （screening 可）。M2 未完了でも screening は進められる。
-   - M2 binding が必要な候補は `WAITING_FOR_M2` に置く（未実装なら TODO）。
-   - GPU lane は常に一つに限定する。
-3. `98_campaign_b_status_dashboard.ipynb`
-   - 読み取り専用。
-   - M2、候補キュー、M3–M6、stale lease、停止理由を表示する。
-   - 計算プロセスの lock や status を変更しない。
+     （screening 可）。
+   - **排他 GPU lane lease**（`campaign_b/_locks/gpu_lane.json`）。
+3. `96_campaign_b_end_to_end.ipynb`（**任意**）
+   - 単独利用 OK。backlog throttle は効率化のオプションであり必須ではない。
+   - **96∥97 をフル GPU consumer として同時起動しない**（lease が第二側を fail closed）。
+4. `98_campaign_b_status_dashboard.ipynb`
+   - 読み取り専用。lock / status を変更しない。
 
 ## 2. 並行実行可能性
 
@@ -139,11 +143,15 @@ WAITING_FOR_M2 → READY_SHARED → S0 → VERIFY → SELECTED
 
 ただし M3 は親 M2 が READY になるまで開始しない。
 
-## 6. バックプレッシャー
+## 6. バックログとバックプレッシャー
 
-producer が無制限に SELECTED を増やさないようにする。
+**89∥97（推奨）:** backlog 成長は許容する。unified throttle を主運用にしない。  
+disk 逼迫時のみ screening を止めるなど、資源ガードは別途。
 
-推奨初期値:
+**96（任意・単独）:** backlog-aware gate（`selected_backlog_target`）は
+効率化のオプション。必須ではない。
+
+将来の分割レーン向け参考値（96 や opt-in end_to_end 用）:
 
 ```yaml
 selected_backlog_target: 8
@@ -153,12 +161,9 @@ gpu_workers: 1
 downstream_cpu_workers: 1
 ```
 
-条件:
-
-- `WAITING_FOR_M3 >= waiting_for_m3_limit` なら screening を停止
-- GPU queue が空なら screening を再開
 - disk free ratio が閾値未満なら新規 candidate を作らない
-- stale lease があれば先に recovery
+- stale GPU lane lease（死 PID / 古い heartbeat）は consumer 起動時に reclaim
+- 生存プロセスの GPU lease は奪わない（fail closed）
 
 ## 7. 停止判定
 
@@ -303,16 +308,17 @@ src/m5_orchestrator.py
 
 ## 11. 推奨運用
 
-1. **通常（Phase 1）:** Notebook **96** を単一 kernel で起動する。
-2. **分割レーン / 95 代替消化:** 97 を GPU kernel で起動（デフォルトは
-   既存 M2-ready backlog の drain；95 と同じ consumer）。
-3. screening が必要なら `DRAIN_EXISTING_BACKLOG=False`（WAITING_FOR_M2 実装後に本領）。
-4. 既存 `READY_FOR_M3` / binding READY は `M2_READY` 待ちなしで M3→M6 へ進む。
-5. Notebook 98 は別 kernel で必要時に上から実行する（読み取り専用）。
-6. Notebook 99 で CERTIFIED を永続カタログへマージする。
-7. GPU は notebook 96 または 97 のどちらか一方だけが取得する（同時起動禁止）。
+1. **推奨:** Notebook **89**（producer）∥ **97**（GPU consumer）。
+   待ち行列が増えてもよい。95 と同じ思想。
+2. 97 のデフォルトは既存 M2-ready / READY_FOR_M3 backlog の drain
+   （`drain_existing_backlog=True` / `skip_screening=True`）。
+3. **任意:** 単独で Notebook **96**（統合スケジューラ）。throttle は必須ではない。
+4. **禁止:** 96∥97 を両方フル GPU consumer として起動しない。
+   `campaign_b/_locks/gpu_lane.json` が第二側を `GpuLaneHeldError` で止める。
+5. 既存 `READY_FOR_M3` / binding READY は `M2_READY` 待ちなしで M3→M6 へ進む。
+6. Notebook 98 は別 kernel で必要時に（読み取り専用）。
+7. Notebook 99 で CERTIFIED を永続カタログへマージする。
 8. M2 worker 数を制限し、GPU pipeline 用メモリを残す。
 
-この構成なら、M2 と screening は並行し、M2 完了後は GPU M3 と
-CPU producer/downstream を部分的に並行できる。一方で単一 GPU と
-global audit の競合は直列化し、再現性を維持する。
+この構成なら、89 の screening と 97 の GPU 消化を並走でき、
+単一 GPU と global audit の競合は lease で直列化する。

@@ -48,6 +48,7 @@ def run_pipeline_to_m6(
     """
     from .advance_selected import run_advance_selected
     from .close_obligations import run_close_obligations_batch
+    from .execution_keys import gpu_lane_lease
     from .gpu_m3_batch import run_gpu_m3_batch
     from .m6_batch import run_m6_batch
     from .pre_m6_batch import run_pre_m6_batch
@@ -57,110 +58,115 @@ def run_pipeline_to_m6(
     started = utc_now()
     rounds: list[dict[str, Any]] = []
 
-    for round_index in range(1, int(max_rounds) + 1):
-        round_doc: dict[str, Any] = {
-            'round': round_index,
-            'started_at': utc_now(),
-            'stages': {},
-        }
-        progress = 0
-
-        if not skip_advance:
-            adv = run_advance_selected(
-                persistent_root=persistent_root,
-                max_candidates=max_advance,
-                force=False,
-                only_campaign_run_id=only_campaign_run_id,
-            )
-            round_doc['stages']['advance'] = {
-                'discovered': adv.get('discovered'),
-                'advanced': adv.get('advanced'),
-                'ready_for_m3': adv.get('ready_for_m3'),
-                'errors': adv.get('errors'),
+    with gpu_lane_lease(persistent_root, owner='pipeline_to_m6'):
+        for round_index in range(1, int(max_rounds) + 1):
+            round_doc: dict[str, Any] = {
+                'round': round_index,
+                'started_at': utc_now(),
+                'stages': {},
             }
-            progress += int(adv.get('advanced') or 0)
+            progress = 0
 
-        if not skip_m3:
-            m3 = run_gpu_m3_batch(
-                persistent_root=persistent_root,
-                project_root=project_root,
-                max_sessions=max_m3_sessions,
-                max_queue=max_queue,
-                only_campaign_run_id=only_campaign_run_id,
-            )
-            round_doc['stages']['m3'] = {
-                'queue_size': m3.get('queue_size'),
-                'sessions_ok': m3.get('sessions_ok'),
-                'm3_complete': m3.get('m3_complete'),
-                'm3_checkpoint': m3.get('m3_checkpoint'),
-                'sessions_error': m3.get('sessions_error'),
-                'errors': m3.get('errors'),
-            }
-            # Count completions and checkpoints once (not sessions_ok, which
-            # double-counts completions).
-            progress += int(m3.get('m3_complete') or 0) + int(m3.get('m3_checkpoint') or 0)
+            if not skip_advance:
+                adv = run_advance_selected(
+                    persistent_root=persistent_root,
+                    max_candidates=max_advance,
+                    force=False,
+                    only_campaign_run_id=only_campaign_run_id,
+                )
+                round_doc['stages']['advance'] = {
+                    'discovered': adv.get('discovered'),
+                    'advanced': adv.get('advanced'),
+                    'ready_for_m3': adv.get('ready_for_m3'),
+                    'errors': adv.get('errors'),
+                }
+                progress += int(adv.get('advanced') or 0)
 
-        if not skip_pre_m6:
-            pre = run_pre_m6_batch(
-                persistent_root=persistent_root,
-                project_root=project_root,
-                max_packages=max_pre_m6_packages,
-                max_stage_sessions=max_stage_sessions,
-                max_queue=max_queue,
-                only_campaign_run_id=only_campaign_run_id,
-            )
-            round_doc['stages']['pre_m6'] = {
-                'queue_size': pre.get('queue_size'),
-                'packages_attempted': pre.get('packages_attempted'),
-                'pre_m6_ready': pre.get('pre_m6_ready'),
-                'm4_checkpoint': pre.get('m4_checkpoint'),
-                'errors': pre.get('errors'),
-            }
-            # Include m4_checkpoint so multi-session M4 resume continues.
-            progress += int(pre.get('pre_m6_ready') or 0) + int(pre.get('m4_checkpoint') or 0)
+            if not skip_m3:
+                m3 = run_gpu_m3_batch(
+                    persistent_root=persistent_root,
+                    project_root=project_root,
+                    max_sessions=max_m3_sessions,
+                    max_queue=max_queue,
+                    only_campaign_run_id=only_campaign_run_id,
+                )
+                round_doc['stages']['m3'] = {
+                    'queue_size': m3.get('queue_size'),
+                    'sessions_ok': m3.get('sessions_ok'),
+                    'm3_complete': m3.get('m3_complete'),
+                    'm3_checkpoint': m3.get('m3_checkpoint'),
+                    'sessions_error': m3.get('sessions_error'),
+                    'errors': m3.get('errors'),
+                }
+                # Count completions and checkpoints once (not sessions_ok, which
+                # double-counts completions).
+                progress += (
+                    int(m3.get('m3_complete') or 0) + int(m3.get('m3_checkpoint') or 0)
+                )
 
-        if not skip_obligations:
-            obl = run_close_obligations_batch(
-                persistent_root=persistent_root,
-                project_root=project_root,
-                max_packages=max_obligation_packages,
-                max_queue=max_queue,
-                only_campaign_run_id=only_campaign_run_id,
-            )
-            round_doc['stages']['obligations'] = {
-                'queue_size': obl.get('queue_size'),
-                'attempted': obl.get('attempted'),
-                'all_closed_count': obl.get('all_closed_count'),
-                'm5_complete_count': obl.get('m5_complete_count'),
-                'still_open': obl.get('still_open'),
-                'errors': obl.get('errors'),
-            }
-            progress += int(obl.get('all_closed_count') or 0)
+            if not skip_pre_m6:
+                pre = run_pre_m6_batch(
+                    persistent_root=persistent_root,
+                    project_root=project_root,
+                    max_packages=max_pre_m6_packages,
+                    max_stage_sessions=max_stage_sessions,
+                    max_queue=max_queue,
+                    only_campaign_run_id=only_campaign_run_id,
+                )
+                round_doc['stages']['pre_m6'] = {
+                    'queue_size': pre.get('queue_size'),
+                    'packages_attempted': pre.get('packages_attempted'),
+                    'pre_m6_ready': pre.get('pre_m6_ready'),
+                    'm4_checkpoint': pre.get('m4_checkpoint'),
+                    'errors': pre.get('errors'),
+                }
+                # Include m4_checkpoint so multi-session M4 resume continues.
+                progress += (
+                    int(pre.get('pre_m6_ready') or 0) + int(pre.get('m4_checkpoint') or 0)
+                )
 
-        if not skip_m6:
-            m6 = run_m6_batch(
-                persistent_root=persistent_root,
-                project_root=project_root,
-                max_packages=max_m6_packages,
-                max_queue=max_queue,
-                only_campaign_run_id=only_campaign_run_id,
-            )
-            round_doc['stages']['m6'] = {
-                'queue_size': m6.get('queue_size'),
-                'attempted': m6.get('attempted'),
-                'm6_complete': m6.get('m6_complete'),
-                'm6_certified_count': m6.get('m6_certified_count'),
-                'm6_not_certified_count': m6.get('m6_not_certified_count'),
-                'errors': m6.get('errors'),
-                'results': m6.get('results'),
-            }
-            progress += int(m6.get('m6_complete') or 0)
+            if not skip_obligations:
+                obl = run_close_obligations_batch(
+                    persistent_root=persistent_root,
+                    project_root=project_root,
+                    max_packages=max_obligation_packages,
+                    max_queue=max_queue,
+                    only_campaign_run_id=only_campaign_run_id,
+                )
+                round_doc['stages']['obligations'] = {
+                    'queue_size': obl.get('queue_size'),
+                    'attempted': obl.get('attempted'),
+                    'all_closed_count': obl.get('all_closed_count'),
+                    'm5_complete_count': obl.get('m5_complete_count'),
+                    'still_open': obl.get('still_open'),
+                    'errors': obl.get('errors'),
+                }
+                progress += int(obl.get('all_closed_count') or 0)
 
-        round_doc['finished_at'] = utc_now()
-        round_doc['progress'] = progress
-        rounds.append(round_doc)
-        if progress == 0:
-            break
+            if not skip_m6:
+                m6 = run_m6_batch(
+                    persistent_root=persistent_root,
+                    project_root=project_root,
+                    max_packages=max_m6_packages,
+                    max_queue=max_queue,
+                    only_campaign_run_id=only_campaign_run_id,
+                )
+                round_doc['stages']['m6'] = {
+                    'queue_size': m6.get('queue_size'),
+                    'attempted': m6.get('attempted'),
+                    'm6_complete': m6.get('m6_complete'),
+                    'm6_certified_count': m6.get('m6_certified_count'),
+                    'm6_not_certified_count': m6.get('m6_not_certified_count'),
+                    'errors': m6.get('errors'),
+                    'results': m6.get('results'),
+                }
+                progress += int(m6.get('m6_complete') or 0)
+
+            round_doc['finished_at'] = utc_now()
+            round_doc['progress'] = progress
+            rounds.append(round_doc)
+            if progress == 0:
+                break
 
     summary = {
         'schema_version': 1,
@@ -214,6 +220,7 @@ def run_pipeline_to_m6(
             'Pipeline 90→91→92→93→94 over Campaign B SELECTED from 89. '
             'Does not run production paperspace M6 gate 81. '
             'Re-run while 89 continues to pick up new SELECTED. '
+            'Holds exclusive GPU lane lease under campaign_b/_locks/gpu_lane.json. '
             'NOT_CERTIFIED / SCREENING_ONLY.'
         ),
         **screening_only_payload(),
