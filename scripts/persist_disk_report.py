@@ -15,6 +15,9 @@ Safe-to-delete patterns with --delete-tmp:
 
 Never deletes: selected packages, CERTIFIED catalogs, COMMITTED checkpoints,
 committed run reports, or seen_normalized_schemes.json.
+
+For reclaiming referenced M3_COMPLETE checkpoint bloat (Option A), see:
+  python scripts/persist_reclaim_m3.py --mode strip-checkpoints
 """
 
 from __future__ import annotations
