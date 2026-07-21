@@ -29,6 +29,11 @@ SPACE_SIZE_KNOWN: dict[str, int] = {
 }
 
 DEFAULT_MAX_WAVES = 8
+EXPANDED_SPACE_NAME = 'campaign_b_s2_space_expanded_v1.yaml'
+DEFAULT_SPACE_PATHS: tuple[str, ...] = (
+    'campaign_b_s2_space_v1.yaml',
+    EXPANDED_SPACE_NAME,
+)
 ADVANCED_STATUSES = frozenset({
     'LINEAGE_PLANNED',
     'FIXTURE_RESIDUAL_DONE',
@@ -267,15 +272,20 @@ def _newest_m7_campaign(persist: Path) -> Path | None:
     return best
 
 
-def _max_waves_from_config(config_path: Path) -> int:
+def _load_mass_config_raw(config_path: Path) -> dict[str, Any] | None:
     if not config_path.is_file():
-        return DEFAULT_MAX_WAVES
+        return None
     try:
         import yaml  # type: ignore
         raw = yaml.safe_load(config_path.read_text(encoding='utf-8'))
     except Exception:  # noqa: BLE001
-        return DEFAULT_MAX_WAVES
-    if not isinstance(raw, dict):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _max_waves_from_config(config_path: Path) -> int:
+    raw = _load_mass_config_raw(config_path)
+    if raw is None:
         return DEFAULT_MAX_WAVES
     mass = raw.get('mass_explore') or {}
     if isinstance(mass, dict) and mass.get('max_waves') is not None:
@@ -284,6 +294,244 @@ def _max_waves_from_config(config_path: Path) -> int:
         except (TypeError, ValueError):
             return DEFAULT_MAX_WAVES
     return DEFAULT_MAX_WAVES
+
+
+def _space_paths_from_config(config_path: Path) -> list[str]:
+    raw = _load_mass_config_raw(config_path)
+    if raw is None:
+        return list(DEFAULT_SPACE_PATHS)
+    mass = raw.get('mass_explore') or {}
+    paths: list[str] = []
+    if isinstance(mass, dict):
+        for name in mass.get('space_paths') or []:
+            text = str(name or '').strip()
+            if text:
+                paths.append(Path(text).name)
+    if paths:
+        return paths
+    search = raw.get('search_space_path')
+    if search:
+        return [Path(str(search)).name]
+    return list(DEFAULT_SPACE_PATHS)
+
+
+def _expected_space_for_wave(wave_index: int, space_paths: list[str]) -> str:
+    """Match mass_explore wave→space mapping (named spaces then expanded extras)."""
+    if wave_index < 0:
+        wave_index = 0
+    if wave_index < len(space_paths):
+        return space_paths[wave_index]
+    if EXPANDED_SPACE_NAME in space_paths:
+        return EXPANDED_SPACE_NAME
+    if space_paths:
+        return space_paths[-1]
+    return EXPANDED_SPACE_NAME
+
+
+def _read_yaml_scalars(path: Path) -> dict[str, str]:
+    """Best-effort top-level scalar parse (no PyYAML required)."""
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding='utf-8')
+    except (OSError, UnicodeError):
+        return out
+    for line in text.splitlines():
+        if not line or line[0] in {' ', '\t', '#', '-'}:
+            continue
+        if ':' not in line:
+            continue
+        key, _, val = line.partition(':')
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if not key or not val:
+            continue
+        if val.startswith(('{', '[', '|', '>')):
+            continue
+        out[key] = val
+    return out
+
+
+def _logical_space_name(raw_name: str | None, *, wave_index: int | None, space_paths: list[str]) -> str:
+    name = Path(str(raw_name or '')).name
+    if name.startswith('wave_') and name.endswith('_space.yaml'):
+        if wave_index is not None:
+            return _expected_space_for_wave(wave_index, space_paths)
+        return EXPANDED_SPACE_NAME
+    if name:
+        return name
+    if wave_index is not None:
+        return _expected_space_for_wave(wave_index, space_paths)
+    return EXPANDED_SPACE_NAME
+
+
+def _space_size_for_name(
+    space_name: str,
+    *,
+    configs_dir: Path,
+    v1_size: int | None,
+    exp_size: int | None,
+) -> int | None:
+    basename = Path(space_name).name
+    if 'expanded' in basename:
+        resolved, _ = resolve_space_size(basename, configs_dir)
+        return resolved if resolved is not None else exp_size
+    if basename in SPACE_SIZE_KNOWN or (
+        basename.endswith('v1.yaml') and 'expanded' not in basename
+    ):
+        resolved, _ = resolve_space_size(basename, configs_dir)
+        if resolved is not None:
+            return resolved
+        if basename in SPACE_SIZE_KNOWN:
+            return SPACE_SIZE_KNOWN[basename]
+        return v1_size
+    resolved, _ = resolve_space_size(basename, configs_dir)
+    if resolved is not None:
+        return resolved
+    return exp_size
+
+
+def _session_recorded_run_ids(waves_list: list[Any]) -> set[str]:
+    out: set[str] = set()
+    for wave in waves_list:
+        if not isinstance(wave, dict):
+            continue
+        run_id = str(wave.get('campaign_run_id') or '').strip()
+        if run_id:
+            out.add(run_id)
+    return out
+
+
+def _list_runtime_wave_configs(runtime_dir: Path) -> list[dict[str, Any]]:
+    """Parse `_mass_explore/runtime/wave_XX_config.yaml` written before each wave runs."""
+    if not runtime_dir.is_dir():
+        return []
+    found: list[dict[str, Any]] = []
+    try:
+        entries = list(runtime_dir.iterdir())
+    except OSError:
+        return []
+    for path in entries:
+        if not path.is_file():
+            continue
+        name = path.name
+        if not (name.startswith('wave_') and name.endswith('_config.yaml')):
+            continue
+        mid = name[len('wave_'):-len('_config.yaml')]
+        try:
+            wave_index = int(mid)
+        except ValueError:
+            continue
+        scalars = _read_yaml_scalars(path)
+        run_id = str(scalars.get('campaign_run_id') or '').strip() or None
+        space = str(scalars.get('search_space_path') or '').strip() or None
+        found.append({
+            'wave': wave_index,
+            'path': str(path),
+            'campaign_run_id': run_id,
+            'search_space_path': space,
+        })
+    found.sort(key=lambda row: int(row['wave']))
+    return found
+
+
+def _campaign_looks_active(campaign: dict[str, Any] | None) -> bool:
+    if not campaign:
+        return False
+    in_flight = (
+        int(campaign.get('queue_pending') or 0)
+        + int(campaign.get('queue_reserved') or 0)
+        + int(campaign.get('queue_running') or 0)
+    )
+    state = str(campaign.get('campaign_state') or '').upper()
+    if in_flight > 0:
+        return True
+    return state in {
+        'RUNNING', 'SCREENING', 'CREATED', 'RESUMED', 'IN_PROGRESS',
+    }
+
+
+def _detect_inflight_wave(
+    persist: Path,
+    *,
+    waves_list: list[Any],
+    waves_done: int,
+    space_paths: list[str],
+) -> dict[str, Any] | None:
+    """Find a wave started after the last session append (session updates on return only).
+
+    Priority:
+      1. runtime/wave_NN_config.yaml with NN >= waves_done
+      2. LATEST_CAMPAIGN_B_RESUME pointing at an unrecorded active M7 campaign
+      3. newest M7 campaign dir not listed in the mass session waves
+    """
+    recorded = _session_recorded_run_ids(waves_list)
+    runtime_dir = persist / 'campaign_b' / '_mass_explore' / 'runtime'
+    runtime_waves = _list_runtime_wave_configs(runtime_dir)
+    for row in reversed(runtime_waves):
+        wave_index = int(row['wave'])
+        if wave_index < waves_done:
+            continue
+        run_id = row.get('campaign_run_id')
+        if not run_id or run_id in recorded:
+            continue
+        campaign_root = persist / 'campaign_b' / str(run_id)
+        space = _logical_space_name(
+            row.get('search_space_path'),
+            wave_index=wave_index,
+            space_paths=space_paths,
+        )
+        return {
+            'wave': wave_index,
+            'campaign_run_id': str(run_id),
+            'space': space,
+            'source': 'runtime_wave_config',
+            'campaign_root': campaign_root if campaign_root.is_dir() else None,
+        }
+
+    resume = _load_json_dict(
+        persist / 'campaign_b' / 'LATEST_CAMPAIGN_B_RESUME.json',
+    )
+    if resume:
+        run_id = str(
+            resume.get('campaign_run_id')
+            or resume.get('resume_campaign_run_id')
+            or '',
+        ).strip()
+        if run_id and run_id not in recorded and run_id.startswith('M7-'):
+            campaign_root = persist / 'campaign_b' / run_id
+            if campaign_root.is_dir():
+                counts = _campaign_counts(campaign_root)
+                if _campaign_looks_active(counts):
+                    wave_hint = resume.get('wave')
+                    try:
+                        wave_index = (
+                            int(wave_hint) if wave_hint is not None else waves_done
+                        )
+                    except (TypeError, ValueError):
+                        wave_index = waves_done
+                    if wave_index < waves_done:
+                        wave_index = waves_done
+                    return {
+                        'wave': wave_index,
+                        'campaign_run_id': run_id,
+                        'space': _expected_space_for_wave(wave_index, space_paths),
+                        'source': 'resume_pointer',
+                        'campaign_root': campaign_root,
+                    }
+
+    newest = _newest_m7_campaign(persist)
+    if newest is not None and newest.name not in recorded:
+        counts = _campaign_counts(newest)
+        if _campaign_looks_active(counts):
+            wave_index = waves_done
+            return {
+                'wave': wave_index,
+                'campaign_run_id': newest.name,
+                'space': _expected_space_for_wave(wave_index, space_paths),
+                'source': 'newest_m7_campaign',
+                'campaign_root': newest,
+            }
+    return None
 
 
 def _label_89(
@@ -301,16 +549,9 @@ def _label_89(
     if session is None and campaign is None:
         return 'UNKNOWN'
     if campaign is not None:
-        in_flight = (
-            int(campaign.get('queue_pending') or 0)
-            + int(campaign.get('queue_reserved') or 0)
-            + int(campaign.get('queue_running') or 0)
-        )
         state = str(campaign.get('campaign_state') or '').upper()
         terminal = campaign.get('terminal_reason')
-        if in_flight > 0 or state in {
-            'RUNNING', 'SCREENING', 'CREATED', 'RESUMED', 'IN_PROGRESS',
-        }:
+        if _campaign_looks_active(campaign):
             return 'WAVE_IN_PROGRESS'
         if state in {'EXHAUSTED', 'FINALIZED', 'COMPLETE', 'DONE'} or terminal:
             if waves_done >= max_waves:
@@ -336,18 +577,18 @@ def estimate_89(
     seen_payload = _load_json(seen_path)
     seen = _seen_count(seen_payload)
     max_waves = _max_waves_from_config(mass_config)
+    space_paths = _space_paths_from_config(mass_config)
     waves = (session or {}).get('waves') if session else None
     waves_list = waves if isinstance(waves, list) else []
     waves_done = len(waves_list)
 
     v1_size, v1_src = resolve_space_size('campaign_b_s2_space_v1.yaml', configs_dir)
-    exp_size, exp_src = resolve_space_size(
-        'campaign_b_s2_space_expanded_v1.yaml', configs_dir,
-    )
+    exp_size, exp_src = resolve_space_size(EXPANDED_SPACE_NAME, configs_dir)
 
     current_wave_index: int | None = None
     current_space: str | None = None
     current_run_id: str | None = None
+    recorded_run_id: str | None = None
     if waves_list:
         last = waves_list[-1]
         if isinstance(last, dict):
@@ -356,26 +597,89 @@ def estimate_89(
             except (TypeError, ValueError):
                 current_wave_index = waves_done - 1
             current_space = str(last.get('space') or '') or None
-            current_run_id = str(last.get('campaign_run_id') or '') or None
+            recorded_run_id = str(last.get('campaign_run_id') or '') or None
+            current_run_id = recorded_run_id
 
     resume = _load_json_dict(
         persist / 'campaign_b' / 'LATEST_CAMPAIGN_B_RESUME.json',
     )
-    if current_run_id is None and resume:
+    inflight = None
+    session_finished = bool(
+        session
+        and (session.get('finished_at') or session.get('status') == 'MASS_EXPLORE_COMPLETE')
+    )
+    if not session_finished:
+        inflight = _detect_inflight_wave(
+            persist,
+            waves_list=waves_list,
+            waves_done=waves_done,
+            space_paths=space_paths,
+        )
+
+    detection_source = 'session_wave'
+    if inflight is not None:
+        current_wave_index = int(inflight['wave'])
+        current_space = str(inflight.get('space') or '') or current_space
+        current_run_id = str(inflight['campaign_run_id'])
+        detection_source = str(inflight.get('source') or 'inflight')
+    elif current_run_id is None and resume:
         current_run_id = (
             str(resume.get('campaign_run_id') or resume.get('resume_campaign_run_id') or '')
             or None
         )
+        detection_source = 'resume_pointer'
+
+    # When the last recorded wave is done but the next wave has not started yet,
+    # remaining-scheme math must use the *next* wave's space (usually expanded).
+    next_wave_index = waves_done
+    next_space = _expected_space_for_wave(next_wave_index, space_paths)
+    if inflight is None and not session_finished and waves_done < max_waves:
+        # Prefer next/current space over the exhausted previous wave space.
+        if current_space is None or (
+            waves_done > 0
+            and 'expanded' not in Path(str(current_space)).name
+            and 'expanded' in Path(next_space).name
+        ):
+            current_space = next_space
+            if current_wave_index is None or current_wave_index < next_wave_index:
+                current_wave_index = next_wave_index
+            detection_source = (
+                detection_source
+                if detection_source != 'session_wave'
+                else 'next_wave_space'
+            )
 
     campaign_root: Path | None = None
-    if current_run_id:
+    if inflight is not None and inflight.get('campaign_root') is not None:
+        campaign_root = Path(inflight['campaign_root'])
+    elif current_run_id:
         candidate = persist / 'campaign_b' / current_run_id
         if candidate.is_dir():
             campaign_root = candidate
     if campaign_root is None:
         campaign_root = _newest_m7_campaign(persist)
         if campaign_root is not None:
-            current_run_id = campaign_root.name
+            # Avoid attributing an unrelated newer campaign when session already
+            # points at a recorded exhausted wave and nothing is in flight.
+            if inflight is not None or recorded_run_id is None:
+                current_run_id = campaign_root.name
+                detection_source = 'newest_m7_campaign'
+            elif campaign_root.name == recorded_run_id:
+                current_run_id = recorded_run_id
+            else:
+                # Keep the session campaign unless newest looks active & unrecorded.
+                newest_counts = _campaign_counts(campaign_root)
+                if (
+                    campaign_root.name not in _session_recorded_run_ids(waves_list)
+                    and _campaign_looks_active(newest_counts)
+                ):
+                    current_run_id = campaign_root.name
+                    current_wave_index = waves_done
+                    current_space = _expected_space_for_wave(waves_done, space_paths)
+                    detection_source = 'newest_m7_campaign'
+                else:
+                    campaign_root = persist / 'campaign_b' / recorded_run_id
+                    current_run_id = recorded_run_id
 
     campaign = _campaign_counts(campaign_root) if campaign_root else None
     label = _label_89(
@@ -385,31 +689,45 @@ def estimate_89(
         campaign=campaign,
     )
 
-    active_space_size = exp_size
-    active_space_name = current_space or 'campaign_b_s2_space_expanded_v1.yaml'
-    if active_space_name.endswith('v1.yaml') and 'expanded' not in active_space_name:
-        active_space_size = v1_size
-    elif active_space_name in SPACE_SIZE_KNOWN:
-        active_space_size = SPACE_SIZE_KNOWN[active_space_name]
-        resolved, _ = resolve_space_size(active_space_name, configs_dir)
-        if resolved is not None:
-            active_space_size = resolved
+    active_space_name = _logical_space_name(
+        current_space,
+        wave_index=current_wave_index,
+        space_paths=space_paths,
+    )
+    # Fail closed toward expanded when mid-session after v1 is exhausted.
+    if (
+        not session_finished
+        and waves_done >= 1
+        and label != 'COMPLETE'
+        and 'expanded' not in Path(active_space_name).name
+    ):
+        active_space_name = next_space if 'expanded' in Path(next_space).name else EXPANDED_SPACE_NAME
+
+    active_space_size = _space_size_for_name(
+        active_space_name,
+        configs_dir=configs_dir,
+        v1_size=v1_size,
+        exp_size=exp_size,
+    )
 
     unseen_approx: int | None = None
     if active_space_size is not None and seen is not None:
         unseen_approx = max(0, int(active_space_size) - int(seen))
 
     waves_remaining = max(0, max_waves - waves_done)
-    if label == 'WAVE_IN_PROGRESS' and waves_done > 0:
-        # Current wave is recorded but not finished → still "remaining" as current.
-        waves_remaining = max(waves_remaining, 1)
+    if label == 'WAVE_IN_PROGRESS' and waves_remaining == 0:
+        waves_remaining = 1
     queue_pending = int((campaign or {}).get('queue_pending') or 0)
     remaining_estimate: dict[str, Any] = {
         'current_wave_queue_pending': queue_pending,
         'schemes_unseen_in_active_space_approx': unseen_approx,
         'waves_remaining_incl_current': waves_remaining if label != 'COMPLETE' else 0,
+        'active_space_name': active_space_name,
+        'active_space_size': active_space_size,
+        'detection_source': detection_source,
         'note': (
-            'unseen ≈ active_space_size − seen_count (skip_seen); '
+            'unseen ≈ active/next wave space_size − seen_count (skip_seen); '
+            'in-flight waves detected via runtime config / resume / newer M7; '
             'wave queue pending is the immediate backlog'
         ),
     }
@@ -436,6 +754,7 @@ def estimate_89(
         'archived_total_session': (session or {}).get('archived_total'),
         'campaign': campaign,
         'remaining': remaining_estimate,
+        'inflight_detection': inflight,
     }
 
 
@@ -679,6 +998,9 @@ def check_89(
         ('current_wave_index', info.get('current_wave_index')),
         ('current_space', info.get('current_space')),
         ('current_campaign_run_id', info.get('current_campaign_run_id')),
+        ('detection_source', rem.get('detection_source')),
+        ('active_space_name', rem.get('active_space_name')),
+        ('active_space_size', rem.get('active_space_size')),
         ('space_v1_size', f"{info.get('space_v1_size')} ({info.get('space_v1_source')})"),
         (
             'space_expanded_size',

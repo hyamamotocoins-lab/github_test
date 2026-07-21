@@ -96,6 +96,198 @@ def test_estimate_89_wave_in_progress(rem, tmp_path: Path) -> None:
     assert info['remaining']['schemes_unseen_in_active_space_approx'] == 45360 - 405
 
 
+def test_estimate_89_inflight_wave1_while_session_lags(rem, tmp_path: Path) -> None:
+    """Paperspace bug: session still lists exhausted wave 0 while wave 1 runs."""
+    mass = tmp_path / 'campaign_b' / '_mass_explore'
+    runtime = mass / 'runtime'
+    runtime.mkdir(parents=True)
+    wave0 = 'M7-20260721T115723Z-b-b908e44125d6'
+    wave1 = 'M7-20260721T115724Z-b-7696b9087a66'
+    camp0 = tmp_path / 'campaign_b' / wave0
+    camp1 = tmp_path / 'campaign_b' / wave1
+    camp0.mkdir(parents=True)
+    camp1.mkdir(parents=True)
+
+    (mass / 'LATEST_MASS_SESSION.json').write_text(
+        json.dumps({
+            'session_id': 'MASS-LAG',
+            'waves': [{
+                'wave': 0,
+                'space': 'campaign_b_s2_space_v1.yaml',
+                'campaign_run_id': wave0,
+                'terminal_reason': 'QUEUE_EXHAUSTED',
+            }],
+            'selected_total': 1,
+            'archived_total': 404,
+        }),
+        encoding='utf-8',
+    )
+    (mass / 'seen_normalized_schemes.json').write_text(
+        json.dumps({'count': 405, 'normalized_scheme_keys': [f'k{i}' for i in range(405)]}),
+        encoding='utf-8',
+    )
+    (camp0 / 'queue.json').write_text(
+        json.dumps({'candidates': [{'candidate_id': 'old', 'state': 'ARCHIVED'}]}),
+        encoding='utf-8',
+    )
+    (camp0 / 'ledger.json').write_text(
+        json.dumps({
+            'campaign_state': 'EXHAUSTED',
+            'terminal_reason': 'QUEUE_EXHAUSTED',
+            'selected': [],
+            'archived_ids': ['old'],
+        }),
+        encoding='utf-8',
+    )
+    (camp1 / 'queue.json').write_text(
+        json.dumps({
+            'candidates': [
+                {'candidate_id': 'n1', 'state': 'PENDING'},
+                {'candidate_id': 'n2', 'state': 'RUNNING'},
+                {'candidate_id': 'n3', 'state': 'SELECTED'},
+            ],
+        }),
+        encoding='utf-8',
+    )
+    (camp1 / 'ledger.json').write_text(
+        json.dumps({'campaign_state': 'RUNNING', 'selected': [{'candidate_id': 'n3'}]}),
+        encoding='utf-8',
+    )
+    (runtime / 'wave_00_config.yaml').write_text(
+        f'campaign_run_id: {wave0}\nsearch_space_path: wave_00_space.yaml\n',
+        encoding='utf-8',
+    )
+    (runtime / 'wave_01_config.yaml').write_text(
+        f'campaign_run_id: {wave1}\nsearch_space_path: wave_01_space.yaml\n',
+        encoding='utf-8',
+    )
+    (tmp_path / 'campaign_b' / 'LATEST_CAMPAIGN_B_RESUME.json').write_text(
+        json.dumps({'campaign_run_id': wave1, 'resume_campaign_run_id': wave1}),
+        encoding='utf-8',
+    )
+
+    configs = REPO_ROOT / 'configs'
+    info = rem.estimate_89(
+        tmp_path,
+        configs_dir=configs,
+        mass_config=configs / 'campaign_b_mass_explore.yaml',
+    )
+    assert info['label'] == 'WAVE_IN_PROGRESS'
+    assert info['waves_done'] == 1
+    assert info['current_wave_index'] == 1
+    assert info['current_campaign_run_id'] == wave1
+    assert info['campaign']['queue_pending'] == 1
+    assert info['campaign']['queue_running'] == 1
+    assert info['remaining']['schemes_unseen_in_active_space_approx'] == 45360 - 405
+    assert info['remaining']['active_space_name'] == 'campaign_b_s2_space_expanded_v1.yaml'
+    assert info['remaining']['detection_source'] == 'runtime_wave_config'
+    assert info['remaining']['waves_remaining_incl_current'] == 7
+
+
+def test_estimate_89_between_waves_uses_expanded_unseen(rem, tmp_path: Path) -> None:
+    """After v1 exhausts, unseen must use expanded size even before wave 1 starts."""
+    mass = tmp_path / 'campaign_b' / '_mass_explore'
+    mass.mkdir(parents=True)
+    wave0 = 'M7-20260721T115723Z-b-b908e44125d6'
+    camp0 = tmp_path / 'campaign_b' / wave0
+    camp0.mkdir(parents=True)
+    (mass / 'LATEST_MASS_SESSION.json').write_text(
+        json.dumps({
+            'session_id': 'MASS-BETWEEN',
+            'waves': [{
+                'wave': 0,
+                'space': 'campaign_b_s2_space_v1.yaml',
+                'campaign_run_id': wave0,
+                'terminal_reason': 'QUEUE_EXHAUSTED',
+            }],
+        }),
+        encoding='utf-8',
+    )
+    (mass / 'seen_normalized_schemes.json').write_text(
+        json.dumps({'count': 405}),
+        encoding='utf-8',
+    )
+    (camp0 / 'queue.json').write_text(
+        json.dumps({'candidates': []}),
+        encoding='utf-8',
+    )
+    (camp0 / 'ledger.json').write_text(
+        json.dumps({
+            'campaign_state': 'EXHAUSTED',
+            'terminal_reason': 'QUEUE_EXHAUSTED',
+        }),
+        encoding='utf-8',
+    )
+    (tmp_path / 'campaign_b' / 'LATEST_CAMPAIGN_B_RESUME.json').write_text(
+        json.dumps({'campaign_run_id': wave0, 'wave': 0}),
+        encoding='utf-8',
+    )
+
+    configs = REPO_ROOT / 'configs'
+    info = rem.estimate_89(
+        tmp_path,
+        configs_dir=configs,
+        mass_config=configs / 'campaign_b_mass_explore.yaml',
+    )
+    assert info['label'] == 'BETWEEN_WAVES'
+    assert info['current_campaign_run_id'] == wave0
+    assert info['remaining']['schemes_unseen_in_active_space_approx'] == 45360 - 405
+    assert info['remaining']['active_space_name'] == 'campaign_b_s2_space_expanded_v1.yaml'
+    assert info['remaining']['waves_remaining_incl_current'] == 7
+
+
+def test_estimate_89_inflight_via_newest_m7_without_runtime(rem, tmp_path: Path) -> None:
+    mass = tmp_path / 'campaign_b' / '_mass_explore'
+    mass.mkdir(parents=True)
+    wave0 = 'M7-20260721T115723Z-b-aaaa00000001'
+    wave1 = 'M7-20260721T115724Z-b-bbbb00000002'
+    camp0 = tmp_path / 'campaign_b' / wave0
+    camp1 = tmp_path / 'campaign_b' / wave1
+    camp0.mkdir(parents=True)
+    camp1.mkdir(parents=True)
+    (mass / 'LATEST_MASS_SESSION.json').write_text(
+        json.dumps({
+            'session_id': 'MASS-NEWEST',
+            'waves': [{
+                'wave': 0,
+                'space': 'campaign_b_s2_space_v1.yaml',
+                'campaign_run_id': wave0,
+            }],
+        }),
+        encoding='utf-8',
+    )
+    (mass / 'seen_normalized_schemes.json').write_text(
+        json.dumps({'count': 405}),
+        encoding='utf-8',
+    )
+    (camp0 / 'queue.json').write_text(json.dumps({'candidates': []}), encoding='utf-8')
+    (camp0 / 'ledger.json').write_text(
+        json.dumps({'campaign_state': 'EXHAUSTED', 'terminal_reason': 'DONE'}),
+        encoding='utf-8',
+    )
+    (camp1 / 'queue.json').write_text(
+        json.dumps({'candidates': [{'candidate_id': 'p', 'state': 'PENDING'}]}),
+        encoding='utf-8',
+    )
+    (camp1 / 'ledger.json').write_text(
+        json.dumps({'campaign_state': 'RUNNING'}),
+        encoding='utf-8',
+    )
+    # Ensure wave1 markers are newer for _newest_m7_campaign.
+    (camp1 / 'queue.json').touch()
+
+    configs = REPO_ROOT / 'configs'
+    info = rem.estimate_89(
+        tmp_path,
+        configs_dir=configs,
+        mass_config=configs / 'campaign_b_mass_explore.yaml',
+    )
+    assert info['label'] == 'WAVE_IN_PROGRESS'
+    assert info['current_campaign_run_id'] == wave1
+    assert info['remaining']['schemes_unseen_in_active_space_approx'] == 45360 - 405
+    assert info['remaining']['detection_source'] == 'newest_m7_campaign'
+
+
 def test_estimate_89_complete(rem, tmp_path: Path) -> None:
     mass = tmp_path / 'campaign_b' / '_mass_explore'
     mass.mkdir(parents=True)
