@@ -60,7 +60,49 @@ def test_find_m2_ready_markers(tmp_path: Path) -> None:
     assert markers[0]['run_id'] == 'M2-1'
 
 
-def test_post_m2_delegates_to_end_to_end(tmp_path: Path) -> None:
+def test_post_m2_defaults_drain_via_pipeline_to_m6(tmp_path: Path) -> None:
+    """Default 97 path = 95-equivalent drain (no screening)."""
+    fake = {
+        'session_id': 'PIPE-mock',
+        'started_at': 't0',
+        'rounds_run': 2,
+        'totals': {'m3_complete': 3, 'advanced': 1},
+        'certification_status': CERTIFICATION_STATUS,
+        'claim_scope': CLAIM_SCOPE,
+    }
+    with (
+        patch(
+            'src.campaign_b.pipeline_to_m6.run_pipeline_to_m6',
+            return_value=fake,
+        ) as pipe,
+        patch('src.campaign_b.end_to_end.run_end_to_end') as e2e,
+    ):
+        summary = run_post_m2_pipeline(
+            persistent_root=tmp_path,
+            project_root=tmp_path,
+            max_rounds=5,
+            max_m3_sessions=16,
+        )
+    assert pipe.called
+    assert not e2e.called
+    kwargs = pipe.call_args.kwargs
+    assert kwargs['max_rounds'] == 5
+    assert kwargs['max_m3_sessions'] == 16
+    assert summary['notebook'] == 97
+    assert summary['mode'] == 'drain_existing_backlog'
+    assert summary['drain_existing_backlog'] is True
+    assert summary['skip_screening'] is True
+    assert summary['gpu_workers'] == 1
+    assert summary['pipeline_to_m6']['session_id'] == 'PIPE-mock'
+    assert summary['pipeline_to_m6']['totals']['m3_complete'] == 3
+    assert 'end_to_end' not in summary
+    assert '95-equivalent' in summary['note']
+    assert summary['certification_status'] == CERTIFICATION_STATUS
+    ledger = tmp_path / 'campaign_b' / '_post_m2' / 'LATEST_POST_M2_SESSION.json'
+    assert ledger.is_file()
+
+
+def test_post_m2_opt_in_end_to_end_screening_path(tmp_path: Path) -> None:
     fake = {
         'session_id': 'E2E-mock',
         'started_at': 't0',
@@ -69,21 +111,26 @@ def test_post_m2_delegates_to_end_to_end(tmp_path: Path) -> None:
         'certification_status': CERTIFICATION_STATUS,
         'claim_scope': CLAIM_SCOPE,
     }
-    with patch(
-        'src.campaign_b.end_to_end.run_end_to_end',
-        return_value=fake,
-    ) as mocked:
+    with (
+        patch(
+            'src.campaign_b.end_to_end.run_end_to_end',
+            return_value=fake,
+        ) as mocked,
+        patch('src.campaign_b.pipeline_to_m6.run_pipeline_to_m6') as pipe,
+    ):
         summary = run_post_m2_pipeline(
             persistent_root=tmp_path,
             project_root=tmp_path,
             max_rounds=2,
+            drain_existing_backlog=False,
             skip_screening=True,
         )
     assert mocked.called
-    assert summary['notebook'] == 97
-    assert summary['gpu_workers'] == 1
+    assert not pipe.called
+    e2e_cfg = mocked.call_args.args[0]
+    assert e2e_cfg.skip_screening is True
+    assert summary['mode'] == 'end_to_end'
+    assert summary['drain_existing_backlog'] is False
     assert summary['end_to_end']['session_id'] == 'E2E-mock'
     assert 'WAITING_FOR_M2' in summary['waiting_for_m2_todo']
     assert summary['certification_status'] == CERTIFICATION_STATUS
-    ledger = tmp_path / 'campaign_b' / '_post_m2' / 'LATEST_POST_M2_SESSION.json'
-    assert ledger.is_file()

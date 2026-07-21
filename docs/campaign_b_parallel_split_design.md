@@ -22,8 +22,13 @@
    - sector 単位で checkpoint する。
    - CPU process pool を使用する。
 2. `97_campaign_b_post_m2_pipeline.ipynb`
-   - screening / selection / M3 / M4 / M5 / obligations / M6 を処理する。
-   - M2 が未完了でも screening は進められる。
+   - **デフォルトは 95 相当の消化レーン**: 既に溜まっている
+     SELECTED / `READY_FOR_M3` / `m2_binding` READY を
+     `advance → M3 → M6`（`run_pipeline_to_m6`）で消費する。
+     `drain_existing_backlog=True` / `skip_screening=True`。
+   - `M2_READY.json` は検出のみ（待機ゲートではない）。
+   - opt-in: `drain_existing_backlog=False` で Phase-1 end_to_end
+     （screening 可）。M2 未完了でも screening は進められる。
    - M2 binding が必要な候補は `WAITING_FOR_M2` に置く（未実装なら TODO）。
    - GPU lane は常に一つに限定する。
 3. `98_campaign_b_status_dashboard.ipynb`
@@ -299,9 +304,10 @@ src/m5_orchestrator.py
 ## 11. 推奨運用
 
 1. **通常（Phase 1）:** Notebook **96** を単一 kernel で起動する。
-2. **分割レーン:** 97 を GPU kernel で起動。将来の M2 builder と並行可。
-3. Notebook 97 は M2 完了前から screening を行う（WAITING_FOR_M2 実装後）。
-4. M2_READY が出ると notebook 97 が binding と M3 を開始する。
+2. **分割レーン / 95 代替消化:** 97 を GPU kernel で起動（デフォルトは
+   既存 M2-ready backlog の drain；95 と同じ consumer）。
+3. screening が必要なら `DRAIN_EXISTING_BACKLOG=False`（WAITING_FOR_M2 実装後に本領）。
+4. 既存 `READY_FOR_M3` / binding READY は `M2_READY` 待ちなしで M3→M6 へ進む。
 5. Notebook 98 は別 kernel で必要時に上から実行する（読み取り専用）。
 6. Notebook 99 で CERTIFIED を永続カタログへマージする。
 7. GPU は notebook 96 または 97 のどちらか一方だけが取得する（同時起動禁止）。
