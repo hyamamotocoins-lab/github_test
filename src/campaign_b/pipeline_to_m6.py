@@ -116,14 +116,21 @@ def run_pipeline_to_m6(
     ``persist_m3_cap_gib`` (default 80.0; None disables): after strip,
     enforce a ``runs/M3-*`` size cap by stripping oldest eligible runs.
 
-    ``auto_keep_latest_m3_checkpoint`` (default True): during M3 sessions,
-    trim older ``ckpt_*`` so mid-flight runs do not pile ckpt_000001…N.
+    ``auto_keep_latest_m3_checkpoint`` (default True):
+    - once at session start: full keep-latest over all ``runs/M3-*`` so older
+      ckpts on M3s not touched this session are reclaimed (~GiB backlog);
+    - during M3 sessions: per-run keep-latest so mid-flight runs do not pile
+      ckpt_000001…N again.
     """
     from .advance_selected import run_advance_selected
     from .close_obligations import run_close_obligations_batch
     from .execution_keys import gpu_lane_lease, refresh_gpu_lane_heartbeat
     from .gpu_m3_batch import run_gpu_m3_batch
-    from .m3_reclaim import auto_strip_after_pipeline_round, fmt_bytes
+    from .m3_reclaim import (
+        auto_strip_after_pipeline_round,
+        fmt_bytes,
+        keep_latest_all_m3_runs,
+    )
     from .m6_batch import run_m6_batch
     from .pre_m6_batch import run_pre_m6_batch
 
@@ -136,6 +143,7 @@ def run_pipeline_to_m6(
         'bytes_freed': 0,
         'rounds_with_reclaim': 0,
         'session_start_full_scan': None,
+        'session_start_keep_latest': None,
         'keep_latest_bytes_freed': 0,
     }
     stop_reason = 'MAX_ROUNDS'
@@ -146,6 +154,17 @@ def run_pipeline_to_m6(
     max_idle = max(1, int(max_idle_rounds))
 
     with gpu_lane_lease(persistent_root, owner='pipeline_to_m6'):
+        # Full keep-latest once per session across all M3 runs (not only the
+        # ones this batch will touch) — clears accumulated older ckpts.
+        if auto_keep_latest_m3_checkpoint:
+            session_kl = keep_latest_all_m3_runs(
+                persistent_root, execute=True,
+            ).as_dict()
+            reclaim_totals['session_start_keep_latest'] = session_kl
+            reclaim_totals['keep_latest_bytes_freed'] += int(
+                session_kl.get('bytes_freed') or 0,
+            )
+
         # Always reclaim already-eligible COMPLETE+downstream backlog once
         # per session — do not wait for this round to produce PRE_M6_READY.
         if auto_strip_m3_checkpoints:
@@ -427,7 +446,8 @@ def run_pipeline_to_m6(
                 else 'M3 auto-strip disabled for this session. '
             )
             + (
-                f"Keep-latest ON (freed≈{reclaim_totals['keep_latest_bytes_freed_human']}). "
+                'Session-start full keep-latest + per-session keep-latest ON '
+                f"(freed≈{reclaim_totals['keep_latest_bytes_freed_human']}). "
                 if auto_keep_latest_m3_checkpoint
                 else 'Keep-latest OFF. '
             )

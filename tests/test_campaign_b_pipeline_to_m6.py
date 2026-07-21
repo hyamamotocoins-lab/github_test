@@ -393,24 +393,82 @@ def test_pipeline_auto_strips_when_flag_set(tmp_path: Path) -> None:
             'src.campaign_b.m3_reclaim.auto_strip_after_pipeline_round',
             side_effect=_reclaim,
         ),
+        patch(
+            'src.campaign_b.m3_reclaim.keep_latest_all_m3_runs',
+        ) as keep_latest,
     ):
+        keep_latest.return_value.as_dict.return_value = {
+            'execute': True,
+            'scope': 'full_scan',
+            'candidates': 3,
+            'trimmed': 2,
+            'stripped': 2,
+            'skipped': 1,
+            'bytes_freed': 99,
+            'bytes_freed_human': '99 B',
+            'run_ids': ['M3-a', 'M3-b'],
+            'actions': [],
+        }
         summary = run_pipeline_to_m6(
             persistent_root=tmp_path,
             project_root=tmp_path,
             max_rounds=1,
             auto_strip_m3_checkpoints=True,
+            auto_keep_latest_m3_checkpoint=True,
         )
 
     # Session-start full scan + per-round strip.
     assert len(reclaim_calls) == 2
     assert reclaim_calls[0]['force_full_scan'] is True
     assert reclaim_calls[1]['force_full_scan'] is False
+    assert keep_latest.called
+    assert keep_latest.call_args.kwargs.get('execute') is True
     assert summary['auto_strip_m3_checkpoints'] is True
+    assert summary['auto_keep_latest_m3_checkpoint'] is True
     assert summary['m3_reclaim']['stripped'] == 2
     assert summary['m3_reclaim']['bytes_freed'] == 84
     assert summary['m3_reclaim']['session_start_full_scan'] is not None
+    assert summary['m3_reclaim']['session_start_keep_latest']['trimmed'] == 2
+    assert summary['m3_reclaim']['keep_latest_bytes_freed'] == 99
     assert summary['totals']['m3_checkpoints_stripped'] == 2
+    assert summary['totals']['m3_keep_latest_bytes_freed'] == 99
     assert summary['rounds'][0]['m3_reclaim']['stripped'] == 1
+    assert summary['stop_reason'] == 'DRAINED_OR_IDLE'
+
+
+def test_pipeline_skips_session_start_keep_latest_when_disabled(tmp_path: Path) -> None:
+    empty = _stage()
+    with (
+        patch('src.campaign_b.advance_selected.run_advance_selected', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.run_gpu_m3_batch', return_value=empty),
+        patch('src.campaign_b.pre_m6_batch.run_pre_m6_batch', return_value=empty),
+        patch(
+            'src.campaign_b.close_obligations.run_close_obligations_batch',
+            return_value=empty,
+        ),
+        patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', side_effect=_empty_queues),
+        patch('src.campaign_b.pre_m6_batch.list_pre_m6_queue', side_effect=_empty_queues),
+        patch(
+            'src.campaign_b.close_obligations.list_obligation_queue',
+            side_effect=_empty_queues,
+        ),
+        patch('src.campaign_b.m6_batch.list_m6_queue', side_effect=_empty_queues),
+        patch('src.campaign_b.m3_reclaim.auto_strip_after_pipeline_round'),
+        patch('src.campaign_b.m3_reclaim.keep_latest_all_m3_runs') as keep_latest,
+    ):
+        summary = run_pipeline_to_m6(
+            persistent_root=tmp_path,
+            project_root=tmp_path,
+            max_rounds=1,
+            auto_strip_m3_checkpoints=False,
+            auto_keep_latest_m3_checkpoint=False,
+        )
+
+    assert not keep_latest.called
+    assert summary['auto_keep_latest_m3_checkpoint'] is False
+    assert summary['m3_reclaim']['session_start_keep_latest'] is None
+    assert summary['m3_reclaim']['keep_latest_bytes_freed'] == 0
     assert summary['stop_reason'] == 'DRAINED_OR_IDLE'
 
 
@@ -435,7 +493,20 @@ def test_pipeline_skips_auto_strip_when_disabled(tmp_path: Path) -> None:
         patch(
             'src.campaign_b.m3_reclaim.auto_strip_after_pipeline_round',
         ) as reclaim,
+        patch('src.campaign_b.m3_reclaim.keep_latest_all_m3_runs') as keep_latest,
     ):
+        keep_latest.return_value.as_dict.return_value = {
+            'execute': True,
+            'scope': 'full_scan',
+            'candidates': 0,
+            'trimmed': 0,
+            'stripped': 0,
+            'skipped': 0,
+            'bytes_freed': 0,
+            'bytes_freed_human': '0 B',
+            'run_ids': [],
+            'actions': [],
+        }
         summary = run_pipeline_to_m6(
             persistent_root=tmp_path,
             project_root=tmp_path,
@@ -444,6 +515,7 @@ def test_pipeline_skips_auto_strip_when_disabled(tmp_path: Path) -> None:
         )
 
     assert not reclaim.called
+    assert keep_latest.called  # keep-latest still ON by default
     assert summary['auto_strip_m3_checkpoints'] is False
     assert summary['m3_reclaim']['stripped'] == 0
     assert 'm3_reclaim' not in summary['rounds'][0]

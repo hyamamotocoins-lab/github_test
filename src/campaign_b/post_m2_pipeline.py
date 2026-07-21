@@ -122,8 +122,9 @@ def run_post_m2_pipeline(
     ``persist_m3_cap_gib`` (default 80.0; None disables): after each strip,
     enforce a ``runs/M3-*`` size cap (oldest eligible first).
 
-    ``auto_keep_latest_m3_checkpoint`` (default True): during M3 sessions,
-    trim older ``ckpt_*`` so mid-flight runs do not accumulate many checkpoints.
+    ``auto_keep_latest_m3_checkpoint`` (default True): session-start full
+    keep-latest over all ``runs/M3-*``, plus per-M3-session trim so mid-flight
+    runs do not accumulate many checkpoints.
 
     Recommended ops: notebook 89 (producer) ∥ this consumer. Backlog growth is OK.
     Exclusive GPU lane lease under campaign_b/_locks/gpu_lane.json — do not run
@@ -220,7 +221,9 @@ def run_post_m2_pipeline(
             )
             + (
                 f"Keep-latest ON "
-                f"(freed≈{m3_reclaim.get('keep_latest_bytes_freed_human', '0 B')}). "
+                f"(session_start_trimmed="
+                f"{(m3_reclaim.get('session_start_keep_latest') or {}).get('trimmed', 0)}, "
+                f"freed≈{m3_reclaim.get('keep_latest_bytes_freed_human', '0 B')}). "
                 if cfg.auto_keep_latest_m3_checkpoint
                 else 'Keep-latest OFF. '
             )
@@ -230,6 +233,7 @@ def run_post_m2_pipeline(
         from .end_to_end import EndToEndConfig, run_end_to_end
         from .m3_reclaim import (
             enforce_persist_m3_cap,
+            keep_latest_all_m3_runs,
             strip_eligible_m3_checkpoints,
         )
 
@@ -251,15 +255,30 @@ def run_post_m2_pipeline(
             disable_session_wallclock=cfg.disable_session_wallclock,
         )
         with gpu_lane_lease(cfg.persistent_root, owner='notebook_97_post_m2'):
-            # Outer lease covers strip + e2e (e2e may nest same-PID).
-            # Session-start full strip before e2e so backlog reclaim is not
-            # gated on this loop producing PRE_M6_READY.
-            m3_reclaim = {}
-            if cfg.auto_strip_m3_checkpoints:
-                m3_reclaim = strip_eligible_m3_checkpoints(
+            # Outer lease covers reclaim + e2e (e2e may nest same-PID).
+            # Session-start full keep-latest + strip before e2e so backlog
+            # reclaim is not gated on this loop producing PRE_M6_READY.
+            m3_reclaim: dict[str, Any] = {
+                'stripped': 0,
+                'bytes_freed': 0,
+                'keep_latest_bytes_freed': 0,
+            }
+            if cfg.auto_keep_latest_m3_checkpoint:
+                session_kl = keep_latest_all_m3_runs(
                     cfg.persistent_root, execute=True,
                 ).as_dict()
-                m3_reclaim['force_full_scan'] = True
+                m3_reclaim['session_start_keep_latest'] = session_kl
+                m3_reclaim['keep_latest_bytes_freed'] = int(
+                    session_kl.get('bytes_freed') or 0,
+                )
+            if cfg.auto_strip_m3_checkpoints:
+                strip_summary = strip_eligible_m3_checkpoints(
+                    cfg.persistent_root, execute=True,
+                ).as_dict()
+                strip_summary['force_full_scan'] = True
+                m3_reclaim['session_start_full_scan'] = strip_summary
+                m3_reclaim['stripped'] = int(strip_summary.get('stripped') or 0)
+                m3_reclaim['bytes_freed'] = int(strip_summary.get('bytes_freed') or 0)
                 if cfg.persist_m3_cap_gib is not None:
                     cap = enforce_persist_m3_cap(
                         cfg.persistent_root,
@@ -267,6 +286,21 @@ def run_post_m2_pipeline(
                         execute=True,
                     )
                     m3_reclaim['persist_cap'] = cap
+                    if int(cap.get('stripped') or 0) > 0:
+                        m3_reclaim['stripped'] = (
+                            int(m3_reclaim['stripped']) + int(cap['stripped'])
+                        )
+                        m3_reclaim['bytes_freed'] = (
+                            int(m3_reclaim['bytes_freed'])
+                            + int(cap.get('bytes_freed') or 0)
+                        )
+            from .m3_reclaim import fmt_bytes
+            m3_reclaim['bytes_freed_human'] = fmt_bytes(
+                int(m3_reclaim.get('bytes_freed') or 0),
+            )
+            m3_reclaim['keep_latest_bytes_freed_human'] = fmt_bytes(
+                int(m3_reclaim.get('keep_latest_bytes_freed') or 0),
+            )
             inner = run_end_to_end(e2e)
         mode = 'end_to_end'
         inner_key = 'end_to_end'
@@ -286,6 +320,14 @@ def run_post_m2_pipeline(
                 f"freed≈{m3_reclaim.get('bytes_freed_human', '0 B')}). "
                 if cfg.auto_strip_m3_checkpoints
                 else 'Auto-strip M3 checkpoints OFF. '
+            )
+            + (
+                f"Keep-latest ON "
+                f"(session_start_trimmed="
+                f"{(m3_reclaim.get('session_start_keep_latest') or {}).get('trimmed', 0)}, "
+                f"freed≈{m3_reclaim.get('keep_latest_bytes_freed_human', '0 B')}). "
+                if cfg.auto_keep_latest_m3_checkpoint
+                else 'Keep-latest OFF. '
             )
             + 'NOT_CERTIFIED / SCREENING_ONLY.'
         )

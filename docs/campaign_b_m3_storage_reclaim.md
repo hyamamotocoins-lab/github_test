@@ -62,8 +62,10 @@ python scripts/persist_reclaim_m3.py --mode keep-latest-checkpoint --execute
 - 最新しい `COMMITTED` `ckpt_*` だけ残し、古い / 未 COMMITTED を削る
 - **quota 逼迫のため notebook 97 / `gpu_m3_batch` 既定 ON**
   （`auto_keep_latest_m3_checkpoint=True`）
-- 各 M3 セッションの resume 前・セッション後に、その run だけ trim
-- CLI: `--mode keep-latest-checkpoint`（一括）
+- **セッション開始時に全 `runs/M3-*` へフル keep-latest**（このバッチで触れない
+  古い M3 の ckpt 積み上げも回収。`m3_reclaim.session_start_keep_latest`）
+- 各 M3 セッションの resume 前・セッション後に、その run だけ trim（再蓄積防止）
+- CLI: `--mode keep-latest-checkpoint`（一括・緊急用。97 再実行後は通常不要）
 
 ### 4. tensors のみ削除（実装済み）
 
@@ -119,7 +121,7 @@ python scripts/persist_reclaim_m3.py --mode keep-latest-checkpoint --execute
 
 ### 移行パス
 
-1. いま: strip after downstream + session-start full scan + keep-latest（本ドキュメント近期）
+1. いま: strip after downstream + session-start full strip + session-start full keep-latest + per-session keep-latest（本ドキュメント近期）
 2. 次: M3 完了時に recipe JSON を必須出力（tensors と併記）← **stub 実装済み**
 3. その後: shared / projector_exact 系は tensors を短寿命化し、recipe のみ永続
 
@@ -133,14 +135,17 @@ python scripts/persist_reclaim_m3.py --mode keep-latest-checkpoint --execute
 | PRE_M6_READY / M6_COMPLETE での strip | **現行基準に含まれる** | M4_COMPLETE 以降なら strip 可。97 は PRE_M6_READY で増分候補化 |
 | persist 木 > N GiB で最古 COMPLETE+downstream を自動 strip | **実装済み** | `persist_m3_cap_gib`（既定 80） |
 | delete-run（未参照 / archived のみ） | CLI のみ | `--allow-delete-run` 必須。パッケージは消さない |
-| keep-latest on hot path | **実装済み（97 既定 ON）** | 進行中 M3 の ckpt 積み上げ抑制 |
+| keep-latest on hot path | **実装済み（97 既定 ON）** | session-start 全 M3 + 進行中 M3 の ckpt 積み上げ抑制 |
 
 ---
 
 ## Paperspace: notebook 97 の自動掃除
 
 1. `git pull` 最新 `main`（本機能含む）
-2. 緊急回収（97 再実行前）:
+2. notebook 97 を再実行すれば、セッション開始時に **strip フルスキャン + keep-latest
+   フルスキャン**が走り、dry-run で見えていた ~GiB 級の古い ckpt も回収される
+   （別途 CLI は不要。緊急で今すぐ空けたいときだけ下の CLI）。
+3. 緊急回収（97 再実行前）:
 
    ```bash
    export VALIDATED_RG_PERSIST_ROOT=/storage/validated_4d_su2_rg
@@ -148,23 +153,24 @@ python scripts/persist_reclaim_m3.py --mode keep-latest-checkpoint --execute
    python scripts/persist_reclaim_m3.py --mode keep-latest-checkpoint --execute
    ```
 
-3. notebook 97 を開く。セル 2 で:
+4. notebook 97 を開く。セル 2 で:
 
    ```python
    AUTO_STRIP_M3_CHECKPOINTS = True       # 既定 ON（session-start フルスキャン含む）
-   AUTO_KEEP_LATEST_M3_CHECKPOINT = True  # 既定 ON
+   AUTO_KEEP_LATEST_M3_CHECKPOINT = True  # 既定 ON（session-start 全 M3 + per-session）
    PERSIST_M3_CAP_GIB = 80.0              # None で無効
    ```
 
-4. セル 3 の `run_post_m2_pipeline(..., auto_strip_m3_checkpoints=..., auto_keep_latest_m3_checkpoint=..., persist_m3_cap_gib=...)`
-5. セッション要約 / ledger `campaign_b/_post_m2/LATEST_POST_M2_SESSION.json` に:
+5. セル 3 の `run_post_m2_pipeline(..., auto_strip_m3_checkpoints=..., auto_keep_latest_m3_checkpoint=..., persist_m3_cap_gib=...)`
+6. セッション要約 / ledger `campaign_b/_post_m2/LATEST_POST_M2_SESSION.json` に:
 
    - `auto_strip_m3_checkpoints` / `auto_keep_latest_m3_checkpoint` / `persist_m3_cap_gib`
    - `m3_reclaim.stripped` / `m3_reclaim.bytes_freed_human`
    - `m3_reclaim.session_start_full_scan`
+   - `m3_reclaim.session_start_keep_latest`（trimmed / bytes_freed）
    - `m3_reclaim.keep_latest_bytes_freed_human`
 
-6. オフにしたいときだけ各 flag を False / None  
+7. オフにしたいときだけ各 flag を False / None  
    （ディスク逼迫時は ON 推奨。dry-run 一括確認は CLI）
 
 ### 安全メモ

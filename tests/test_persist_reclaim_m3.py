@@ -289,6 +289,33 @@ def test_keep_latest_for_m3_run_id_trims_midflight(tmp_path: Path) -> None:
     assert [p.name for p in ckpts] == ['ckpt_000004']
 
 
+def test_keep_latest_all_m3_runs_full_scan(tmp_path: Path) -> None:
+    """Session-start full keep-latest trims every M3 with older ckpts."""
+    root = tmp_path / 'persist'
+    _m3_complete_tree(root / 'runs' / 'M3-a', ckpt_blob=200, n_ckpts=3)
+    _m3_complete_tree(root / 'runs' / 'M3-b', ckpt_blob=200, n_ckpts=4)
+    # Already stripped — must be skipped.
+    stripped = root / 'runs' / 'M3-stripped' / 'checkpoints'
+    stripped.mkdir(parents=True)
+    (stripped / 'STRIPPED_FOR_RECLAIM.json').write_text('{}\n', encoding='utf-8')
+    _m3_complete_tree(root / 'runs' / 'M3-stripped', ckpt_blob=200, n_ckpts=3)
+
+    summary = lib.keep_latest_all_m3_runs(root, execute=True)
+    assert summary.scope == 'full_scan'
+    assert summary.trimmed == 2
+    assert summary.bytes_freed > 0
+    assert set(summary.run_ids) == {'M3-a', 'M3-b'}
+    assert [p.name for p in sorted((root / 'runs' / 'M3-a' / 'checkpoints').glob('ckpt_*'))] == [
+        'ckpt_000003',
+    ]
+    assert [p.name for p in sorted((root / 'runs' / 'M3-b' / 'checkpoints').glob('ckpt_*'))] == [
+        'ckpt_000004',
+    ]
+    d = summary.as_dict()
+    assert d['stripped'] == 2  # alias
+    assert 'bytes_freed_human' in d
+
+
 def test_write_m3_recipe_stub(tmp_path: Path) -> None:
     from types import SimpleNamespace
 

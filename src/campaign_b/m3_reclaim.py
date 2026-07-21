@@ -634,6 +634,84 @@ def keep_latest_for_m3_run_id(
     }
 
 
+@dataclass
+class KeepLatestReclaimSummary:
+    execute: bool
+    scope: str  # 'full_scan'
+    candidates: int
+    trimmed: int
+    skipped: int
+    bytes_freed: int
+    run_ids: list[str] = field(default_factory=list)
+    actions: list[dict[str, Any]] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **asdict(self),
+            'bytes_freed_human': fmt_bytes(self.bytes_freed),
+            # Alias for summary consumers that expect strip-like naming.
+            'stripped': self.trimmed,
+        }
+
+
+def keep_latest_all_m3_runs(
+    persistent_root: Path,
+    *,
+    execute: bool = True,
+    include_certified_lineage: bool = False,
+) -> KeepLatestReclaimSummary:
+    """Full-scan keep-latest over all ``runs/M3-*`` (CLI keep-latest mode).
+
+    Trims older / uncommitted ``ckpt_*`` on every M3 run that still has
+    reclaimable keep-latest bytes — including incomplete / mid-flight runs
+    that are not strip-eligible. Skips already-stripped runs and (by default)
+    CERTIFIED M6 lineage. Used at notebook 97 session start so older M3
+    checkpoints accumulate across sessions are reclaimed without a separate CLI.
+    """
+    persistent_root = Path(persistent_root)
+    rows = classify_m3_runs(
+        persistent_root,
+        include_certified_lineage=include_certified_lineage,
+    )
+    targets: list[M3Classification] = []
+    for row in rows:
+        if row.already_stripped:
+            continue
+        if row.certified_lineage and not include_certified_lineage:
+            continue
+        if row.reclaimable_keep_latest_bytes <= 0:
+            continue
+        targets.append(row)
+
+    freed = 0
+    trimmed = 0
+    actions: list[dict[str, Any]] = []
+    trimmed_ids: list[str] = []
+    for row in targets:
+        nbytes, label = keep_latest_for_run(
+            persistent_root, row, execute=execute,
+        )
+        actions.append({
+            'run_id': row.run_id,
+            'label': label,
+            'bytes': nbytes,
+        })
+        if label in {'KEPT_LATEST_REMOVED_OLDER', 'WOULD_KEEP_LATEST'}:
+            freed += nbytes
+            trimmed += 1
+            trimmed_ids.append(row.run_id)
+    return KeepLatestReclaimSummary(
+        execute=execute,
+        scope='full_scan',
+        candidates=len(targets),
+        trimmed=trimmed,
+        skipped=len(rows) - len(targets),
+        bytes_freed=freed,
+        run_ids=trimmed_ids,
+        actions=actions,
+    )
+
+
 def delete_run(
     persistent_root: Path,
     row: M3Classification,
