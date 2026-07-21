@@ -21,6 +21,7 @@ __all__ = [
     'run_pre_m6_batch',
     'run_close_obligations_batch',
     'run_m6_batch',
+    'run_pipeline_to_m6',
 ]
 
 
@@ -52,4 +53,7 @@ def __getattr__(name: str):
     if name == 'run_m6_batch':
         from .m6_batch import run_m6_batch
         return run_m6_batch
+    if name == 'run_pipeline_to_m6':
+        from .pipeline_to_m6 import run_pipeline_to_m6
+        return run_pipeline_to_m6
     raise AttributeError(name)

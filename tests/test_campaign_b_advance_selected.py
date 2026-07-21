@@ -54,7 +54,8 @@ def test_discover_and_advance_without_parent(tmp_path: Path) -> None:
     )
     assert session['certification_status'] == CERTIFICATION_STATUS
     assert session['claim_scope'] == CLAIM_SCOPE
-    assert session['discovered'] == 3
+    # discovered is post-filter when only_campaign_run_id is set
+    assert session['discovered'] == 2
     assert session['attempted'] == 2
     assert session['advanced'] == 2
     assert session['parent_m6_package'] is None

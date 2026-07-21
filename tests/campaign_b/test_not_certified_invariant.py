@@ -34,6 +34,9 @@ def test_m6_phase_forbidden() -> None:
 
 
 def test_no_m6_or_campaign_c_imports() -> None:
+    # Staged live_parent M6 (notebook 94 / pipeline 95) may import the
+    # orchestrator. Production paperspace gate helpers remain forbidden.
+    allowed_m6_orchestrator = {'m6_batch.py'}
     forbidden_modules = {
         'm6_orchestrator',
         'm7_auto_execute',
@@ -48,10 +51,14 @@ def test_no_m6_or_campaign_c_imports() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
+                    if path.name in allowed_m6_orchestrator:
+                        continue
                     assert 'm6_orchestrator' not in alias.name
             if isinstance(node, ast.ImportFrom):
                 mod = node.module or ''
                 for part in forbidden_modules:
+                    if part == 'm6_orchestrator' and path.name in allowed_m6_orchestrator:
+                        continue
                     assert part not in mod, f'{path.name} imports {mod}'
                 for alias in node.names:
                     assert alias.name not in forbidden_names, (
