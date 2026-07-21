@@ -60,7 +60,7 @@ def write_session_artifacts(
     *,
     stop_reason: str,
     elapsed_s: float,
-    remaining_s: float,
+    remaining_s: float | None,
     persistent_root: Path,
     project_root: Path,
 ) -> dict[str, str]:

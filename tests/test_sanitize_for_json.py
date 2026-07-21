@@ -55,3 +55,29 @@ def test_m3_summary_contract_nonfinite_does_not_raise_or_certify() -> None:
     assert clean['phase'] == 'M3_RUNNING'
     assert clean['certification_status'] == 'NOT_CERTIFIED'
     json.dumps(clean, ensure_ascii=False, indent=2, allow_nan=False)
+
+
+def test_m3_summary_remaining_none_does_not_demote_complete() -> None:
+    """Wallclock-off remaining_s=None must not look like numerical nonfinite."""
+    summary = {
+        'milestone': 'M3',
+        'phase': 'M3_COMPLETE',
+        'milestone_status': 'CORE_REPRODUCED',
+        'certification_status': 'NOT_CERTIFIED',
+        'elapsed_s': 12.5,
+        'remaining_s': None,
+        'stop_reason': 'M3 already complete; no work was started',
+    }
+    clean, had_nonfinite = sanitize_for_json(summary)
+    assert had_nonfinite is False
+    assert clean['remaining_s'] is None
+    # Mirror m3_orchestrator._summary: only demote when had_nonfinite.
+    if had_nonfinite:
+        clean['nonfinite_values_present'] = True
+        if clean.get('phase') == 'M3_COMPLETE':
+            clean['phase'] = 'M3_RUNNING'
+            clean['milestone_status'] = 'EXPLORATORY'
+    assert clean['phase'] == 'M3_COMPLETE'
+    assert clean['milestone_status'] == 'CORE_REPRODUCED'
+    assert 'nonfinite_values_present' not in clean
+    json.dumps(clean, ensure_ascii=False, indent=2, allow_nan=False)

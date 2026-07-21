@@ -602,6 +602,10 @@ def run_one_gpu_m3(
         clean_result.get('phase') if isinstance(clean_result, dict) else None
     )
     if had_nonfinite:
+        # Operator note: pre-fix false positives may exist when wallclock was
+        # disabled and remaining_s was Inf (scheduling sentinel, not tensor NaN).
+        # If package has reports/M3_report.json and orch phase was M3_COMPLETE,
+        # reclassify via --include-blocked / clear gpu_m3_status then requeue.
         out = {
             'status': 'M3_BLOCKED_NONFINITE',
             'm2_run_id': prepared['m2_run_id'],

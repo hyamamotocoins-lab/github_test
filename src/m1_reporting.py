@@ -179,9 +179,9 @@ def write_m1_report_package(
     return {'json': str(json_path), 'markdown': str(md_path), 'acceptance': str(acceptance_path)}
 
 
-def write_m1_session_artifacts(
+def write_m1_session_reports(
     run_root: Path, state: RunState, queue: WorkQueue, stop_reason: str,
-    elapsed_s: float, remaining_s: float, persistent_root: Path, project_root: Path,
+    elapsed_s: float, remaining_s: float | None, persistent_root: Path, project_root: Path,
 ) -> dict[str, str]:
     report_dir = run_root / 'reports'; report_dir.mkdir(parents=True, exist_ok=True)
     counts = {status: sum(item.status == status for item in queue.items.values()) for status in ('pending', 'running', 'done', 'failed', 'blocked_resource')}

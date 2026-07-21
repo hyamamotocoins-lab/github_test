@@ -41,9 +41,15 @@ class SessionGuard:
     def elapsed_s(self) -> float:
         return max(0.0, self.clock() - self.started_monotonic)
 
-    def remaining_s(self) -> float:
+    def remaining_s(self) -> float | None:
+        """Seconds until hard return, or ``None`` when session wall-clock is off.
+
+        Returning ``None`` (not ``inf``) keeps session summaries JSON-safe so
+        ``sanitize_for_json`` does not falsely flag scheduling as numerical
+        nonfinite / demote ``M3_COMPLETE``.
+        """
         if session_wallclock_disabled():
-            return float('inf')
+            return None
         return max(0.0, self.config.hard_return_s - self.elapsed_s())
 
     def state(self) -> SessionState:
@@ -80,4 +86,8 @@ class SessionGuard:
             return False
         if state is SessionState.NO_LONG_TASK and predicted_s > self.config.short_task_limit_s:
             return False
-        return self.remaining_s() >= 1.3 * predicted_s + self.config.checkpoint_reserve_s
+        remaining = self.remaining_s()
+        if remaining is None:
+            # Wallclock-disabled path returns earlier; treat as unlimited budget.
+            return True
+        return remaining >= 1.3 * predicted_s + self.config.checkpoint_reserve_s

@@ -273,7 +273,7 @@ def write_m4_report_package(
 
 def write_m4_session_artifacts(
     run_root: Path, state: RunState, queue: WorkQueue, stop_reason: str,
-    elapsed_s: float, remaining_s: float, persistent_root: Path,
+    elapsed_s: float, remaining_s: float | None, persistent_root: Path,
     project_root: Path, session_policy: str,
 ) -> dict[str, str]:
     report_dir = run_root / 'reports'; report_dir.mkdir(parents=True, exist_ok=True)

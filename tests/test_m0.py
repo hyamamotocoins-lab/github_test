@@ -96,6 +96,22 @@ def test_session_guard_boundaries_and_prediction() -> None:
     assert guard.state() is SessionState.RETURN
 
 
+def test_session_guard_remaining_none_when_wallclock_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('VALIDATED_RG_DISABLE_SESSION_WALLCLOCK', '1')
+    config = RunConfig(
+        checkpoint_interval_s=1.0, max_work_item_s=2.0, short_task_limit_s=0.5,
+        checkpoint_reserve_s=0.1, no_long_task_after_s=3.0, drain_after_s=4.0,
+        final_save_after_s=5.0, hard_return_s=6.0, dummy_predicted_s=1.0,
+    )
+    guard = SessionGuard(config, clock=FakeClock())
+    assert guard.state() is SessionState.RUN
+    assert guard.remaining_s() is None
+    assert guard.may_start(1.0) is True
+    assert guard.may_start(3.0) is False  # still respects max_work_item_s
+
+
 def test_work_queue_rejects_content_hash_drift() -> None:
     queue = WorkQueue()
     item_id = queue.add('DUMMY', 'input', {'index': 0}, 1.0)
