@@ -1,0 +1,25 @@
+schema_version: 1
+campaign: B_S2_END_TO_END
+persistent_root: /storage/validated_4d_su2_rg
+# Phase 1 backlog-aware scheduler (notebook 96)
+selected_backlog_target: 8
+screening_chunk_size: 32
+max_rounds: 100
+max_m3_sessions: 8
+max_pre_m6_packages: 8
+max_stage_sessions: 6
+max_obligation_packages: 8
+max_m6_packages: 8
+max_queue: 500
+max_advance: null
+only_campaign_run_id: null
+mass_explore_config: campaign_b_mass_explore.yaml
+# Ignored until Phase 2
+m3_backend: legacy_rsvd
+disable_session_wallclock: true
+skip_screening: false
+skip_advance: false
+skip_m3: false
+skip_pre_m6: false
+skip_obligations: false
+skip_m6: false

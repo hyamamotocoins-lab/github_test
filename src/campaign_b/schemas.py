@@ -36,6 +36,7 @@ CANDIDATE_STATES: Final = frozenset({
     'BORDERLINE_Q',
     'M2_RESOLVE',
     'NEED_CANONICAL_M2',
+    'WAITING_FOR_M2',  # parallel-split design; reconciler TODO in driver
     'READY_SHARED',
     'S0',
     'INDEPENDENT_VERIFY',

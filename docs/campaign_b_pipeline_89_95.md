@@ -1,5 +1,12 @@
 # Campaign B パイプライン処理仕様（Notebook 89 / 95）
 
+> **後継:** Phase 1 では Notebook **96** の backlog-aware 統合スケジューラが
+> 89/95 二重ループを置換する。設計は
+> [campaign_b_end_to_end_design.md](./campaign_b_end_to_end_design.md)。
+> 分割レーン（97/98）は
+> [campaign_b_parallel_split_design.md](./campaign_b_parallel_split_design.md)。
+> M6 CERTIFIED 永続カタログは Notebook **99**。
+
 Paperspace 上で Notebook **89**（mass explore）と **95**（pipeline_to_m6）を運用するときの、**各ステージが実際に何を計算・読み書きするか**の技術仕様。要約ではなく、コード上の処理ステップに沿って記述する。
 
 | ノート | エントリ | 実装 |

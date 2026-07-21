@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
 from .config import RunConfig
+
+# Notebook 96 / end-to-end mode: disable 5h20/5h30 session wall-clock stops.
+# Item-level checkpoints remain; fail-closed certification is unchanged.
+_DISABLE_WALLCLOCK_ENV = 'VALIDATED_RG_DISABLE_SESSION_WALLCLOCK'
+
+
+def session_wallclock_disabled() -> bool:
+    return os.environ.get(_DISABLE_WALLCLOCK_ENV, '').strip() in {'1', 'true', 'TRUE', 'yes', 'YES'}
 
 
 class SessionState(str, Enum):
@@ -33,9 +42,13 @@ class SessionGuard:
         return max(0.0, self.clock() - self.started_monotonic)
 
     def remaining_s(self) -> float:
+        if session_wallclock_disabled():
+            return float('inf')
         return max(0.0, self.config.hard_return_s - self.elapsed_s())
 
     def state(self) -> SessionState:
+        if session_wallclock_disabled():
+            return SessionState.RUN
         elapsed = self.elapsed_s()
         if elapsed >= self.config.hard_return_s:
             return SessionState.RETURN
@@ -56,6 +69,10 @@ class SessionGuard:
     def may_start(self, predicted_s: float) -> bool:
         if not math.isfinite(predicted_s) or predicted_s <= 0.0:
             return False
+        if session_wallclock_disabled():
+            if predicted_s > self.config.max_work_item_s:
+                return False
+            return True
         state = self.state()
         if state not in {SessionState.RUN, SessionState.NO_LONG_TASK}:
             return False

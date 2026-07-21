@@ -22,6 +22,13 @@ __all__ = [
     'run_close_obligations_batch',
     'run_m6_batch',
     'run_pipeline_to_m6',
+    'run_end_to_end',
+    'EndToEndConfig',
+    'load_end_to_end_config',
+    'run_post_m2_pipeline',
+    'collect_pipeline_status',
+    'scan_and_update_catalog',
+    'recover_interrupted_work',
 ]
 
 
@@ -56,4 +63,25 @@ def __getattr__(name: str):
     if name == 'run_pipeline_to_m6':
         from .pipeline_to_m6 import run_pipeline_to_m6
         return run_pipeline_to_m6
+    if name == 'run_end_to_end':
+        from .end_to_end import run_end_to_end
+        return run_end_to_end
+    if name == 'EndToEndConfig':
+        from .end_to_end import EndToEndConfig
+        return EndToEndConfig
+    if name == 'load_end_to_end_config':
+        from .end_to_end import load_end_to_end_config
+        return load_end_to_end_config
+    if name == 'run_post_m2_pipeline':
+        from .post_m2_pipeline import run_post_m2_pipeline
+        return run_post_m2_pipeline
+    if name == 'collect_pipeline_status':
+        from .pipeline_status import collect_pipeline_status
+        return collect_pipeline_status
+    if name == 'scan_and_update_catalog':
+        from .m6_certified_catalog import scan_and_update_catalog
+        return scan_and_update_catalog
+    if name == 'recover_interrupted_work':
+        from .pipeline_recovery import recover_interrupted_work
+        return recover_interrupted_work
     raise AttributeError(name)
