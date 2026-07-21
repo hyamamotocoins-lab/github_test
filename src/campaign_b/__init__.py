@@ -20,6 +20,7 @@ __all__ = [
     'run_gpu_m3_batch',
     'run_pre_m6_batch',
     'run_close_obligations_batch',
+    'run_m6_batch',
 ]
 
 
@@ -48,4 +49,7 @@ def __getattr__(name: str):
     if name == 'run_close_obligations_batch':
         from .close_obligations import run_close_obligations_batch
         return run_close_obligations_batch
+    if name == 'run_m6_batch':
+        from .m6_batch import run_m6_batch
+        return run_m6_batch
     raise AttributeError(name)
