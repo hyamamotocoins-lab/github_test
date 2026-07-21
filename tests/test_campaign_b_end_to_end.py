@@ -50,6 +50,10 @@ def _cfg(tmp_path: Path, **kwargs: Any) -> EndToEndConfig:
         max_rounds=5,
         skip_screening=True,
         screening_chunk_size=32,
+        # Keep unit tests free of real reclaim I/O unless a test opts in.
+        auto_strip_m3_checkpoints=False,
+        auto_keep_latest_m3_checkpoint=False,
+        persist_m3_cap_gib=None,
     )
     defaults.update(kwargs)
     return EndToEndConfig(**defaults)
@@ -224,3 +228,123 @@ def test_sets_disable_wallclock_env(tmp_path: Path, monkeypatch: Any) -> None:
     ):
         run_end_to_end(_cfg(tmp_path))
     assert os.environ.get('VALIDATED_RG_DISABLE_SESSION_WALLCLOCK') == '1'
+
+
+def test_m3_reclaim_session_start_and_per_round(tmp_path: Path) -> None:
+    """Mirror notebook 97: session-start keep-latest + strip, per-round strip."""
+    empty = _stage()
+    reclaim_calls: list[dict[str, Any]] = []
+
+    def _reclaim(*_a: Any, **kwargs: Any) -> dict[str, Any]:
+        reclaim_calls.append(dict(kwargs))
+        if kwargs.get('force_full_scan'):
+            return {
+                'stripped': 2,
+                'bytes_freed': 50,
+                'force_full_scan': True,
+            }
+        return {
+            'stripped': 1,
+            'bytes_freed': 34,
+            'force_full_scan': False,
+        }
+
+    m3_q = [_stage(m3_complete=1, keep_latest_bytes_freed=7), _stage()]
+
+    def _m3(**kwargs: Any) -> dict[str, Any]:
+        assert kwargs.get('auto_keep_latest_m3_checkpoint') is True
+        return m3_q.pop(0) if m3_q else empty
+
+    with (
+        patch('src.campaign_b.pipeline_recovery.recover_interrupted_work', return_value={}),
+        patch('src.campaign_b.execution_keys.acquire_gpu_lock', return_value={}),
+        patch('src.campaign_b.execution_keys.release_gpu_lock', return_value=True),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', return_value=[]),
+        patch('src.campaign_b.gpu_m3_batch.run_gpu_m3_batch', side_effect=_m3),
+        patch('src.campaign_b.pre_m6_batch.run_pre_m6_batch', return_value=empty),
+        patch(
+            'src.campaign_b.close_obligations.run_close_obligations_batch',
+            return_value=empty,
+        ),
+        patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch('src.campaign_b.advance_selected.run_advance_selected', return_value=empty),
+        patch(
+            'src.campaign_b.m3_reclaim.auto_strip_after_pipeline_round',
+            side_effect=_reclaim,
+        ),
+        patch('src.campaign_b.m3_reclaim.keep_latest_all_m3_runs') as keep_latest,
+    ):
+        keep_latest.return_value.as_dict.return_value = {
+            'execute': True,
+            'scope': 'full_scan',
+            'candidates': 3,
+            'trimmed': 2,
+            'stripped': 2,
+            'skipped': 1,
+            'bytes_freed': 99,
+            'bytes_freed_human': '99 B',
+            'run_ids': ['M3-a', 'M3-b'],
+            'actions': [],
+        }
+        summary = run_end_to_end(
+            _cfg(
+                tmp_path,
+                max_rounds=2,
+                auto_strip_m3_checkpoints=True,
+                auto_keep_latest_m3_checkpoint=True,
+                persist_m3_cap_gib=80.0,
+            ),
+        )
+
+    assert len(reclaim_calls) == 3  # session-start + round1 + round2 (idle stop)
+    # First call is session-start full scan; later calls are per-round.
+    assert reclaim_calls[0]['force_full_scan'] is True
+    assert reclaim_calls[0]['persist_m3_cap_gib'] == 80.0
+    assert reclaim_calls[1]['force_full_scan'] is False
+    assert keep_latest.called
+    assert summary['auto_strip_m3_checkpoints'] is True
+    assert summary['auto_keep_latest_m3_checkpoint'] is True
+    assert summary['persist_m3_cap_gib'] == 80.0
+    assert summary['m3_reclaim']['session_start_full_scan'] is not None
+    assert summary['m3_reclaim']['session_start_keep_latest']['trimmed'] == 2
+    assert summary['m3_reclaim']['stripped'] == 2 + 1 + 1  # session + 2 rounds
+    assert summary['m3_reclaim']['keep_latest_bytes_freed'] == 99 + 7
+    assert 'm3_reclaim' in summary['rounds'][0]
+    assert 'Auto-strip M3 checkpoints ON' in summary['note']
+    assert 'Keep-latest ON' in summary['note']
+
+
+def test_m3_reclaim_off_skips_hooks(tmp_path: Path) -> None:
+    empty = _stage()
+    with (
+        patch('src.campaign_b.pipeline_recovery.recover_interrupted_work', return_value={}),
+        patch('src.campaign_b.execution_keys.acquire_gpu_lock', return_value={}),
+        patch('src.campaign_b.execution_keys.release_gpu_lock', return_value=True),
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', return_value=[]),
+        patch('src.campaign_b.gpu_m3_batch.run_gpu_m3_batch', return_value=empty) as m3,
+        patch('src.campaign_b.pre_m6_batch.run_pre_m6_batch', return_value=empty),
+        patch(
+            'src.campaign_b.close_obligations.run_close_obligations_batch',
+            return_value=empty,
+        ),
+        patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch('src.campaign_b.advance_selected.run_advance_selected', return_value=empty),
+        patch('src.campaign_b.m3_reclaim.auto_strip_after_pipeline_round') as strip,
+        patch('src.campaign_b.m3_reclaim.keep_latest_all_m3_runs') as keep_latest,
+    ):
+        summary = run_end_to_end(
+            _cfg(
+                tmp_path,
+                auto_strip_m3_checkpoints=False,
+                auto_keep_latest_m3_checkpoint=False,
+            ),
+        )
+
+    assert not strip.called
+    assert not keep_latest.called
+    assert m3.call_args.kwargs.get('auto_keep_latest_m3_checkpoint') is False
+    assert summary['auto_strip_m3_checkpoints'] is False
+    assert summary['auto_keep_latest_m3_checkpoint'] is False
+    assert summary['m3_reclaim']['session_start_keep_latest'] is None
+    assert summary['m3_reclaim']['stripped'] == 0
+    assert 'm3_reclaim' not in summary['rounds'][0]

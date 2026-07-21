@@ -132,7 +132,7 @@ def run_post_m2_pipeline(
 
     Drain path (default): no outer lease — ``run_pipeline_to_m6`` owns
     ``owner=pipeline_to_m6``. End-to-end path: outer lease
-    ``owner=notebook_97_post_m2`` (covers strip + e2e).
+    ``owner=notebook_97_post_m2``; reclaim is handled inside ``run_end_to_end``.
     """
     from .execution_keys import gpu_lane_lease
 
@@ -231,11 +231,6 @@ def run_post_m2_pipeline(
         )
     else:
         from .end_to_end import EndToEndConfig, run_end_to_end
-        from .m3_reclaim import (
-            enforce_persist_m3_cap,
-            keep_latest_all_m3_runs,
-            strip_eligible_m3_checkpoints,
-        )
 
         e2e = EndToEndConfig(
             persistent_root=cfg.persistent_root,
@@ -253,61 +248,30 @@ def run_post_m2_pipeline(
             only_campaign_run_id=cfg.only_campaign_run_id,
             skip_screening=cfg.skip_screening,
             disable_session_wallclock=cfg.disable_session_wallclock,
+            auto_strip_m3_checkpoints=cfg.auto_strip_m3_checkpoints,
+            persist_m3_cap_gib=cfg.persist_m3_cap_gib,
+            auto_keep_latest_m3_checkpoint=cfg.auto_keep_latest_m3_checkpoint,
         )
         with gpu_lane_lease(cfg.persistent_root, owner='notebook_97_post_m2'):
-            # Outer lease covers reclaim + e2e (e2e may nest same-PID).
-            # Session-start full keep-latest + strip before e2e so backlog
-            # reclaim is not gated on this loop producing PRE_M6_READY.
-            m3_reclaim: dict[str, Any] = {
-                'stripped': 0,
-                'bytes_freed': 0,
-                'keep_latest_bytes_freed': 0,
-            }
-            if cfg.auto_keep_latest_m3_checkpoint:
-                session_kl = keep_latest_all_m3_runs(
-                    cfg.persistent_root, execute=True,
-                ).as_dict()
-                m3_reclaim['session_start_keep_latest'] = session_kl
-                m3_reclaim['keep_latest_bytes_freed'] = int(
-                    session_kl.get('bytes_freed') or 0,
-                )
-            if cfg.auto_strip_m3_checkpoints:
-                strip_summary = strip_eligible_m3_checkpoints(
-                    cfg.persistent_root, execute=True,
-                ).as_dict()
-                strip_summary['force_full_scan'] = True
-                m3_reclaim['session_start_full_scan'] = strip_summary
-                m3_reclaim['stripped'] = int(strip_summary.get('stripped') or 0)
-                m3_reclaim['bytes_freed'] = int(strip_summary.get('bytes_freed') or 0)
-                if cfg.persist_m3_cap_gib is not None:
-                    cap = enforce_persist_m3_cap(
-                        cfg.persistent_root,
-                        cap_gib=float(cfg.persist_m3_cap_gib),
-                        execute=True,
-                    )
-                    m3_reclaim['persist_cap'] = cap
-                    if int(cap.get('stripped') or 0) > 0:
-                        m3_reclaim['stripped'] = (
-                            int(m3_reclaim['stripped']) + int(cap['stripped'])
-                        )
-                        m3_reclaim['bytes_freed'] = (
-                            int(m3_reclaim['bytes_freed'])
-                            + int(cap.get('bytes_freed') or 0)
-                        )
-            from .m3_reclaim import fmt_bytes
-            m3_reclaim['bytes_freed_human'] = fmt_bytes(
-                int(m3_reclaim.get('bytes_freed') or 0),
-            )
-            m3_reclaim['keep_latest_bytes_freed_human'] = fmt_bytes(
-                int(m3_reclaim.get('keep_latest_bytes_freed') or 0),
-            )
+            # Outer lease covers e2e (e2e may nest same-PID). Reclaim hooks
+            # live inside run_end_to_end (same as notebook 96).
             inner = run_end_to_end(e2e)
         mode = 'end_to_end'
         inner_key = 'end_to_end'
+        m3_reclaim = (
+            inner.get('m3_reclaim')
+            if isinstance(inner.get('m3_reclaim'), dict)
+            else {}
+        )
         inner_summary = {
             'session_id': inner.get('session_id'),
             'rounds_run': inner.get('rounds_run'),
             'totals': inner.get('totals'),
+            'auto_strip_m3_checkpoints': inner.get('auto_strip_m3_checkpoints'),
+            'auto_keep_latest_m3_checkpoint': inner.get(
+                'auto_keep_latest_m3_checkpoint',
+            ),
+            'persist_m3_cap_gib': inner.get('persist_m3_cap_gib'),
             'm3_reclaim': m3_reclaim,
         }
         note = (

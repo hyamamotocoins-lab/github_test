@@ -2,15 +2,17 @@
 
 ## 1. 結論
 
-Notebook **96** は **任意の単一ノート統合スケジューラ**（backlog-aware）。
-**推奨の運用は 89∥97**（旧 89∥95 と同じ producer/consumer）。待ち行列が増えてもよい。
+Notebook **96** は **スタンドアロンの任意単一ノート統合スケジューラ**
+（`run_end_to_end`）。**89∥97 の代替**であり、推奨運用は **89∥97**
+（旧 89∥95 と同じ producer/consumer）。待ち行列が増えてもよい。
 96 の backlog throttle を主運用にしない。
+**96 と 97 を同時フル起動しない**（同一 GPU lane lease）。
 
 | ノート | 役割 |
 |---|---|
 | **89** | screening / mass-explore **producer**（推奨） |
 | **97** | post-M2 **consumer**（95 相当；推奨、89 と並走可） |
-| **96** | 統合スケジューラ（**任意**；単独利用 OK） |
+| **96** | 統合スケジューラ（**任意・スタンドアロン**；97 と排他） |
 | **98** | 読み取り専用ダッシュボード |
 | **99** | M6 `CERTIFIED` 永続カタログ |
 
@@ -20,6 +22,8 @@ Notebook **96** は **任意の単一ノート統合スケジューラ**（backl
   — 89∥97 推奨と GPU lane lease。
 - [campaign_b_pipeline_89_95.md](./campaign_b_pipeline_89_95.md)
   — 89/95 処理仕様（97 が 95 後継 consumer）。
+- [campaign_b_m3_storage_reclaim.md](./campaign_b_m3_storage_reclaim.md)
+  — M3 keep-latest / strip（96 と 97 で同一 knobs）。
 
 ## 2. Phase 1 スコープ（96 実装）
 
@@ -81,7 +85,24 @@ max_queue: 500
 m3_backend: legacy_rsvd   # Phase 2 まで無視
 mass_explore_config: campaign_b_mass_explore.yaml
 disable_session_wallclock: true
+# M3 storage reclaim（97 と同じ既定）
+auto_strip_m3_checkpoints: true
+auto_keep_latest_m3_checkpoint: true
+persist_m3_cap_gib: 80.0
 ```
+
+## 5.1 M3 ストレージ回収（96 = 97 と同じ）
+
+`run_end_to_end` は notebook 97 / `run_pipeline_to_m6` と同じ reclaim を行う:
+
+1. セッション開始: 全 `runs/M3-*` へフル keep-latest
+2. セッション開始 / 各ラウンド後: COMPLETE+downstream の strip-checkpoints
+3. `persist_m3_cap_gib`（既定 80）でサイズキャップ
+4. `run_gpu_m3_batch(..., auto_keep_latest_m3_checkpoint=...)` で per-M3 trim
+
+要約フィールド: `m3_reclaim.session_start_keep_latest` / `session_start_full_scan` /
+`stripped` / `bytes_freed_human` / `keep_latest_bytes_freed_human`。  
+詳細: [campaign_b_m3_storage_reclaim.md](./campaign_b_m3_storage_reclaim.md)。
 
 ## 6. 回復・GPU lane lease
 
@@ -123,7 +144,8 @@ disable_session_wallclock: true
 1. main を pull
 2. **推奨:** Notebook **89**（CPU/screening）∥ **97**（CUDA consumer）
 3. 待ち行列（SELECTED / READY_FOR_M3）が増えてもよい。M2 が先に終わってもよい。
-4. **任意:** 単独で **96** を使う（統合スケジューラ）。throttle は必須ではない。
+4. **任意・スタンドアロン:** **96 だけ**を使う（統合スケジューラ）。
+   **97 と同時に起動しない。** throttle は必須ではない。
 5. **98** で状態確認、**99** で CERTIFIED カタログ更新
 6. 誤って 96 と 97 を両方フル起動した場合、後から lease を取れない側が明確にエラーする
 

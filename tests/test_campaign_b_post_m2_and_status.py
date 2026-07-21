@@ -177,6 +177,16 @@ def test_post_m2_opt_in_end_to_end_screening_path(tmp_path: Path) -> None:
         'started_at': 't0',
         'rounds_run': 1,
         'totals': {'m3_complete': 0},
+        'auto_strip_m3_checkpoints': True,
+        'auto_keep_latest_m3_checkpoint': True,
+        'persist_m3_cap_gib': 80.0,
+        'm3_reclaim': {
+            'stripped': 1,
+            'bytes_freed': 10,
+            'bytes_freed_human': '10 B',
+            'session_start_keep_latest': {'trimmed': 1},
+            'keep_latest_bytes_freed_human': '5 B',
+        },
         'certification_status': CERTIFICATION_STATUS,
         'claim_scope': CLAIM_SCOPE,
     }
@@ -198,8 +208,12 @@ def test_post_m2_opt_in_end_to_end_screening_path(tmp_path: Path) -> None:
     assert not pipe.called
     e2e_cfg = mocked.call_args.args[0]
     assert e2e_cfg.skip_screening is True
+    assert e2e_cfg.auto_strip_m3_checkpoints is True
+    assert e2e_cfg.auto_keep_latest_m3_checkpoint is True
+    assert e2e_cfg.persist_m3_cap_gib == 80.0
     assert summary['mode'] == 'end_to_end'
     assert summary['drain_existing_backlog'] is False
     assert summary['end_to_end']['session_id'] == 'E2E-mock'
+    assert summary['m3_reclaim']['stripped'] == 1
     assert 'WAITING_FOR_M2' in summary['waiting_for_m2_todo']
     assert summary['certification_status'] == CERTIFICATION_STATUS

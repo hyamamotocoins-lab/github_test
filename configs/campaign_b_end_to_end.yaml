@@ -23,3 +23,7 @@ skip_m3: false
 skip_pre_m6: false
 skip_obligations: false
 skip_m6: false
+# M3 storage reclaim (same defaults as notebook 97)
+auto_strip_m3_checkpoints: true
+auto_keep_latest_m3_checkpoint: true
+persist_m3_cap_gib: 80.0

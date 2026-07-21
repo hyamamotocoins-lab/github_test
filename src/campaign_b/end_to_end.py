@@ -46,6 +46,10 @@ class EndToEndConfig:
     skip_pre_m6: bool = False
     skip_obligations: bool = False
     skip_m6: bool = False
+    # M3 storage reclaim (same defaults as notebook 97 / pipeline_to_m6).
+    auto_strip_m3_checkpoints: bool = True
+    persist_m3_cap_gib: float | None = 80.0
+    auto_keep_latest_m3_checkpoint: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -113,6 +117,11 @@ def load_end_to_end_config(
         skip_pre_m6=bool(_get('skip_pre_m6', False)),
         skip_obligations=bool(_get('skip_obligations', False)),
         skip_m6=bool(_get('skip_m6', False)),
+        auto_strip_m3_checkpoints=bool(_get('auto_strip_m3_checkpoints', True)),
+        persist_m3_cap_gib=_get('persist_m3_cap_gib', 80.0),
+        auto_keep_latest_m3_checkpoint=bool(
+            _get('auto_keep_latest_m3_checkpoint', True),
+        ),
         extra={k: v for k, v in raw.items() if k not in {
             'persistent_root', 'project_root', 'selected_backlog_target',
             'screening_chunk_size', 'max_rounds', 'max_m3_sessions',
@@ -120,7 +129,9 @@ def load_end_to_end_config(
             'max_m6_packages', 'max_queue', 'max_advance', 'only_campaign_run_id',
             'mass_explore_config', 'm3_backend', 'disable_session_wallclock',
             'skip_screening', 'skip_advance', 'skip_m3', 'skip_pre_m6',
-            'skip_obligations', 'skip_m6', 'schema_version', 'campaign',
+            'skip_obligations', 'skip_m6', 'auto_strip_m3_checkpoints',
+            'persist_m3_cap_gib', 'auto_keep_latest_m3_checkpoint',
+            'schema_version', 'campaign',
         }},
     )
 
@@ -200,7 +211,18 @@ def run_end_to_end(
     config: EndToEndConfig | Path | str | None = None,
     **overrides: Any,
 ) -> dict[str, Any]:
-    """Run backlog-aware end-to-end rounds until idle or max_rounds."""
+    """Run backlog-aware end-to-end rounds until idle or max_rounds.
+
+    M3 storage reclaim (defaults match notebook 97 / ``run_pipeline_to_m6``):
+
+    - ``auto_keep_latest_m3_checkpoint``: session-start full keep-latest over
+      all ``runs/M3-*``, plus per-M3-session trim via ``run_gpu_m3_batch``.
+    - ``auto_strip_m3_checkpoints``: session-start full strip of
+      COMPLETE+downstream, plus per-round incremental strip.
+    - ``persist_m3_cap_gib`` (default 80.0; None disables): size cap after strip.
+
+    See ``docs/campaign_b_m3_storage_reclaim.md``.
+    """
     if isinstance(config, EndToEndConfig):
         cfg = config
         for key, value in overrides.items():
@@ -216,6 +238,11 @@ def run_end_to_end(
     from .close_obligations import run_close_obligations_batch
     from .execution_keys import acquire_gpu_lock, release_gpu_lock
     from .gpu_m3_batch import run_gpu_m3_batch
+    from .m3_reclaim import (
+        auto_strip_after_pipeline_round,
+        fmt_bytes,
+        keep_latest_all_m3_runs,
+    )
     from .m6_batch import run_m6_batch
     from .pipeline_recovery import recover_interrupted_work
     from .pre_m6_batch import run_pre_m6_batch
@@ -224,8 +251,42 @@ def run_end_to_end(
     recovery = recover_interrupted_work(cfg.persistent_root)
     acquire_gpu_lock(cfg.persistent_root, owner='notebook_96_end_to_end')
     rounds: list[dict[str, Any]] = []
+    reclaim_totals: dict[str, Any] = {
+        'stripped': 0,
+        'bytes_freed': 0,
+        'rounds_with_reclaim': 0,
+        'session_start_full_scan': None,
+        'session_start_keep_latest': None,
+        'keep_latest_bytes_freed': 0,
+    }
 
     try:
+        # Session-start full keep-latest across all M3 runs (not only this batch).
+        if cfg.auto_keep_latest_m3_checkpoint:
+            session_kl = keep_latest_all_m3_runs(
+                cfg.persistent_root, execute=True,
+            ).as_dict()
+            reclaim_totals['session_start_keep_latest'] = session_kl
+            reclaim_totals['keep_latest_bytes_freed'] += int(
+                session_kl.get('bytes_freed') or 0,
+            )
+
+        # Session-start full strip of COMPLETE+downstream backlog.
+        if cfg.auto_strip_m3_checkpoints:
+            session_start = auto_strip_after_pipeline_round(
+                cfg.persistent_root,
+                pre_m6_summary=None,
+                m6_summary=None,
+                execute=True,
+                persist_m3_cap_gib=cfg.persist_m3_cap_gib,
+                force_full_scan=True,
+            )
+            reclaim_totals['session_start_full_scan'] = session_start
+            reclaim_totals['stripped'] += int(session_start.get('stripped') or 0)
+            reclaim_totals['bytes_freed'] += int(session_start.get('bytes_freed') or 0)
+            if int(session_start.get('stripped') or 0) > 0:
+                reclaim_totals['rounds_with_reclaim'] += 1
+
         for round_index in range(1, int(cfg.max_rounds) + 1):
             round_doc: dict[str, Any] = {
                 'round': round_index,
@@ -234,6 +295,8 @@ def run_end_to_end(
                 'm3_backend': cfg.m3_backend,  # recorded only; unused in Phase 1
             }
             progress = 0
+            pre: dict[str, Any] | None = None
+            m6: dict[str, Any] | None = None
 
             # --- 1) M3 / downstream first ---
             if not cfg.skip_m3:
@@ -243,6 +306,7 @@ def run_end_to_end(
                     max_sessions=cfg.max_m3_sessions,
                     max_queue=cfg.max_queue,
                     only_campaign_run_id=cfg.only_campaign_run_id,
+                    auto_keep_latest_m3_checkpoint=cfg.auto_keep_latest_m3_checkpoint,
                 )
                 round_doc['stages']['m3'] = {
                     'queue_size': m3.get('queue_size'),
@@ -250,7 +314,11 @@ def run_end_to_end(
                     'm3_checkpoint': m3.get('m3_checkpoint'),
                     'sessions_error': m3.get('sessions_error'),
                     'errors': m3.get('errors'),
+                    'keep_latest_bytes_freed': m3.get('keep_latest_bytes_freed'),
                 }
+                reclaim_totals['keep_latest_bytes_freed'] += int(
+                    m3.get('keep_latest_bytes_freed') or 0,
+                )
                 # Completions only — do NOT count m3_checkpoint alone.
                 progress += int(m3.get('m3_complete') or 0)
 
@@ -304,6 +372,21 @@ def run_end_to_end(
                 }
                 progress += int(m6.get('m6_complete') or 0)
 
+            if cfg.auto_strip_m3_checkpoints:
+                reclaim = auto_strip_after_pipeline_round(
+                    cfg.persistent_root,
+                    pre_m6_summary=pre,
+                    m6_summary=m6,
+                    execute=True,
+                    persist_m3_cap_gib=cfg.persist_m3_cap_gib,
+                    force_full_scan=False,
+                )
+                round_doc['m3_reclaim'] = reclaim
+                reclaim_totals['stripped'] += int(reclaim.get('stripped') or 0)
+                reclaim_totals['bytes_freed'] += int(reclaim.get('bytes_freed') or 0)
+                if int(reclaim.get('stripped') or 0) > 0:
+                    reclaim_totals['rounds_with_reclaim'] += 1
+
             # --- 2) screen + advance only if backlog thin ---
             queue_len = _m3_queue_len(cfg)
             round_doc['m3_queue_len'] = queue_len
@@ -346,6 +429,10 @@ def run_end_to_end(
     finally:
         release_gpu_lock(cfg.persistent_root, owner='notebook_96_end_to_end')
 
+    reclaim_totals['bytes_freed_human'] = fmt_bytes(int(reclaim_totals['bytes_freed']))
+    reclaim_totals['keep_latest_bytes_freed_human'] = fmt_bytes(
+        int(reclaim_totals['keep_latest_bytes_freed']),
+    )
     summary = {
         'schema_version': 1,
         'session_id': f"E2E-{utc_now().replace(':', '').replace('-', '')[:15]}Z",
@@ -355,6 +442,10 @@ def run_end_to_end(
         'max_rounds': cfg.max_rounds,
         'selected_backlog_target': cfg.selected_backlog_target,
         'm3_backend': cfg.m3_backend,
+        'auto_strip_m3_checkpoints': bool(cfg.auto_strip_m3_checkpoints),
+        'auto_keep_latest_m3_checkpoint': bool(cfg.auto_keep_latest_m3_checkpoint),
+        'persist_m3_cap_gib': cfg.persist_m3_cap_gib,
+        'm3_reclaim': reclaim_totals,
         'wallclock_disabled': os.environ.get(_DISABLE_WALLCLOCK_ENV),
         'recovery': {
             'removed_tmp_count': recovery.get('removed_tmp_count'),
@@ -390,11 +481,27 @@ def run_end_to_end(
         },
         'rounds': rounds,
         'note': (
-            'Notebook 96 Phase-1 backlog-aware scheduler. '
-            'Screen+advance only when M3 queue < selected_backlog_target. '
-            'Progress excludes m3_checkpoint-only. '
+            'Notebook 96 Phase-1 backlog-aware scheduler (standalone optional '
+            'alternative to 89∥97). Screen+advance only when M3 queue < '
+            'selected_backlog_target. Progress excludes m3_checkpoint-only. '
+            'Do not run concurrently with notebook 97 (GPU lane lease). '
             'Does not run production gate 81. '
-            'NOT_CERTIFIED / SCREENING_ONLY.'
+            + (
+                f"Auto-strip M3 checkpoints ON "
+                f"(stripped={reclaim_totals.get('stripped', 0)}, "
+                f"freed≈{reclaim_totals.get('bytes_freed_human', '0 B')}). "
+                if cfg.auto_strip_m3_checkpoints
+                else 'Auto-strip M3 checkpoints OFF. '
+            )
+            + (
+                f"Keep-latest ON "
+                f"(session_start_trimmed="
+                f"{(reclaim_totals.get('session_start_keep_latest') or {}).get('trimmed', 0)}, "
+                f"freed≈{reclaim_totals.get('keep_latest_bytes_freed_human', '0 B')}). "
+                if cfg.auto_keep_latest_m3_checkpoint
+                else 'Keep-latest OFF. '
+            )
+            + 'NOT_CERTIFIED / SCREENING_ONLY.'
         ),
         **screening_only_payload(),
     }
