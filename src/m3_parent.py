@@ -142,12 +142,13 @@ def _load_and_crosscheck_tensors(
                 raise M3ParentError(
                     f'Accepted M2 float tensor disagrees with exact reconstruction: {name}'
                 )
-            result[name] = actual.copy()
+            result[name] = actual
         return result
-    return {
-        name: np.asarray(loaded[name], dtype=np.float64).copy()
-        for name in sorted(loaded)
-    }
+    result = {}
+    for name in sorted(loaded):
+        actual = np.asarray(loaded[name], dtype=np.float64)
+        result[name] = actual
+    return result
 
 
 def resolve_m2_parent_audit_path(project_root: Path, config: M3Config) -> Path:

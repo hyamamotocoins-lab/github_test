@@ -165,13 +165,16 @@ def _markdown(report: dict[str, Any]) -> str:
         f"- TF32 disabled: {backend['tf32_disabled']}", '',
         '## Matrix-free validation', '',
         f"- global operator dimension: {validation['dimension']}",
-        f"- explicit matvec max abs error: {validation['matvec_max_abs_error']:.6e}",
+        f"- block-reference matvec max abs error: {validation['matvec_max_abs_error']:.6e}",
         f"- adjoint relative error: {validation['adjoint_relative_error']:.6e}",
-        f"- path cache reused: {validation['path_cache_reused']}", '',
+        f"- path cache reused: {validation['path_cache_reused']}",
+        f"- reference mode: {validation.get('reference_mode', 'legacy_explicit_dense')}",
+        f"- avoided dense bytes: {validation.get('avoided_dense_matrix_bytes', 0)}", '',
         '## Fixed-seed RSVD and Triad', '',
         f"- target rank: {rsvd['target_rank']}",
         f"- relative Frobenius residual: {rsvd['relative_residual_frobenius']:.6e}",
-        f"- explicit-optimal residual ratio: {rsvd['residual_to_explicit_optimal_ratio']:.9f}",
+        f"- reference-optimal residual ratio: {rsvd['residual_to_explicit_optimal_ratio']:.9f}",
+        f"- reference spectrum: {rsvd.get('reference_spectrum_mode', 'legacy_block_svd')}",
         f"- approximate influence proxy: {rsvd['influence_proxy']['value']:.9f}",
         f"- screening: {rsvd['influence_proxy']['screening']}",
         f"- triad factor bytes: {triad['factor_bytes']}", '',
@@ -196,6 +199,8 @@ def write_m3_report_package(
         operator_dimension=config.operator_dimension,
     )
     rsvd = results['M3_RSVD']['result']
+    cleanup_path = run_root / 'reports' / 'M3_storage_cleanup.json'
+    cleanup = read_json(cleanup_path) if cleanup_path.is_file() else {}
     report = {
         'schema_version': 1, 'milestone': 'M3', 'phase': state.phase,
         'run_id': state.run_id, 'generated_at': utc_now(),
@@ -210,6 +215,7 @@ def write_m3_report_package(
         'source_hash': manifest['source_hash'],
         'notebook_hash': manifest['notebook_hash'],
         'results': results, 'tests': test_report, 'acceptance_gates': gates,
+        'storage_cleanup': cleanup if isinstance(cleanup, dict) else {},
         'proof_artifact_hashes': {
             item.phase: item.result_sha256 for item in queue.items.values()
             if item.status == 'done' and item.result_sha256
@@ -222,11 +228,12 @@ def write_m3_report_package(
         'memory': peak_memory_report(),
         'gpu_memory': results['M3_BACKEND_DIAGNOSTIC']['result']['memory_after'],
         'reproduced_results': [
-            'matrix-free sector-shard matvec agrees with explicit low-cutoff matrix',
+            'matrix-free sector-shard matvec agrees with a block-explicit CPU reference without a global dense matrix',
             'matrix-free adjoint consistency',
             'fixed-seed RSVD basis is checkpoint-reproducible',
             'three-factor Triad pilot reconstructed from the fixed RSVD result',
             'contraction path cache reuse and deterministic shard ordering',
+            'checkpoint retention prunes older committed M3 checkpoints while retaining the newest M4 parent',
         ],
         'heuristic_results': [
             'RSVD singular-value decay', 'RSVD residual estimate',
@@ -238,7 +245,7 @@ def write_m3_report_package(
             'No deterministic RSVD residual enclosure exists at M3.',
             'GPU backward/rounding error is not yet bounded.',
             'The influence proxy is not a rigorous spectral-radius bound.',
-            'M3 is a j2_max=1 finite-core pilot, not a 4D RG certificate.',
+            'M3 remains a finite-cutoff exploratory pilot, not a 4D RG certificate.',
         ],
         'remaining_todos': [
             'independent M3 acceptance review', 'M4 forward derivatives',

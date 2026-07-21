@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 import random
@@ -44,6 +45,166 @@ M3_NOTEBOOK_HASH_POLICY = 'canonical_nbformat4_cell_type_source_tags_v1'
 
 class M3CompatibilityError(RuntimeError):
     '''Raised when an M3 run cannot be created or resumed exactly.'''
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    if not path.exists() or path.is_symlink():
+        return 0
+    for root, directories, files in os.walk(path, followlinks=False):
+        directories[:] = [
+            name for name in directories
+            if not (Path(root) / name).is_symlink()
+        ]
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _checkpoint_keep_count() -> int:
+    raw = os.environ.get('VALIDATED_RG_M3_CHECKPOINT_KEEP', '1').strip()
+    try:
+        keep = int(raw)
+    except ValueError as exc:
+        raise M3CompatibilityError(
+            'VALIDATED_RG_M3_CHECKPOINT_KEEP must be an integer.'
+        ) from exc
+    if not 1 <= keep <= 8:
+        raise M3CompatibilityError(
+            'VALIDATED_RG_M3_CHECKPOINT_KEEP must lie in [1, 8].'
+        )
+    return keep
+
+
+def _prune_committed_checkpoints(
+    checkpoint_root: Path, *, keep: int,
+) -> dict[str, Any]:
+    '''Keep only the newest committed checkpoints; never follow symlinks.'''
+    candidates: list[tuple[int, Path]] = []
+    skipped_symlinks: list[str] = []
+    if not checkpoint_root.is_dir():
+        return {
+            'removed': 0, 'bytes_freed': 0, 'kept': [],
+            'skipped_symlinks': skipped_symlinks,
+        }
+    for path in checkpoint_root.iterdir():
+        if not path.name.startswith('ckpt_'):
+            continue
+        if path.is_symlink():
+            skipped_symlinks.append(path.name)
+            continue
+        if not path.is_dir() or not (path / 'COMMITTED').is_file():
+            continue
+        try:
+            index = int(path.name.removeprefix('ckpt_'))
+        except ValueError:
+            continue
+        candidates.append((index, path))
+    candidates.sort()
+    remove = candidates[:-keep] if len(candidates) > keep else []
+    freed = 0
+    removed: list[str] = []
+    for _index, path in remove:
+        size = _directory_size(path)
+        shutil.rmtree(path)
+        freed += size
+        removed.append(path.name)
+    return {
+        'removed': len(removed), 'removed_names': removed,
+        'bytes_freed': freed,
+        'kept': [path.name for _, path in candidates[-keep:]],
+        'skipped_symlinks': skipped_symlinks,
+    }
+
+
+def _blockwise_reference_matvec(
+    operator: ArmillaryLinearOperator, vector: np.ndarray, *, adjoint: bool = False,
+) -> np.ndarray:
+    '''Exact CPU block reference without allocating the global dense matrix.'''
+    source = np.asarray(vector, dtype=np.float64)
+    if source.ndim != 1 or source.shape[0] != operator.dimension:
+        raise ValueError('M3 block reference vector has the wrong shape.')
+    output = np.empty_like(source)
+    offset = 0
+    for block in operator.blocks:
+        projector = np.asarray(block.projector, dtype=np.float64)
+        if projector.ndim != 2 or projector.shape[0] != projector.shape[1]:
+            raise ArithmeticError('M3 operator block projector is not square.')
+        size = projector.shape[0]
+        stop = offset + size
+        if stop > operator.dimension:
+            raise ArithmeticError('M3 operator block layout exceeds its dimension.')
+        matrix = projector.T if adjoint else projector
+        output[offset:stop] = float(block.weight) * (
+            matrix @ source[offset:stop]
+        )
+        offset = stop
+    if offset != operator.dimension:
+        raise ArithmeticError('M3 operator block layout does not fill its dimension.')
+    return output
+
+
+def _reference_singular_values(
+    operator: ArmillaryLinearOperator,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    '''Use projector rank spectra, with exact-SVD fallback for unsafe blocks.'''
+    values: list[np.ndarray] = []
+    fast_blocks = 0
+    fallback_blocks = 0
+    max_symmetry_error = 0.0
+    max_trace_error = 0.0
+    max_frobenius_rank_error = 0.0
+    for block in operator.blocks:
+        projector = np.asarray(block.projector, dtype=np.float64)
+        if projector.ndim != 2 or projector.shape[0] != projector.shape[1]:
+            raise ArithmeticError('M3 RSVD reference projector is not square.')
+        size = projector.shape[0]
+        symmetry_error = float(np.max(np.abs(projector - projector.T)))
+        trace = float(np.trace(projector))
+        rank = int(round(trace))
+        trace_error = abs(trace - rank)
+        frobenius_sq = float(np.vdot(projector, projector).real)
+        frobenius_rank_error = abs(frobenius_sq - rank)
+        max_symmetry_error = max(max_symmetry_error, symmetry_error)
+        max_trace_error = max(max_trace_error, trace_error)
+        max_frobenius_rank_error = max(
+            max_frobenius_rank_error, frobenius_rank_error,
+        )
+        scale = max(1, size)
+        projector_safe = (
+            0 <= rank <= size
+            and symmetry_error <= 1e-12 * scale
+            and trace_error <= 1e-10 * scale
+            and frobenius_rank_error <= 1e-10 * scale
+        )
+        if projector_safe:
+            if rank:
+                values.append(np.full(rank, abs(float(block.weight))))
+            fast_blocks += 1
+        else:
+            values.append(np.linalg.svd(
+                float(block.weight) * projector, compute_uv=False,
+            ))
+            fallback_blocks += 1
+    concatenated = (
+        np.concatenate(values) if values else np.empty(0, dtype=np.float64)
+    )
+    concatenated.sort()
+    concatenated = concatenated[::-1]
+    return concatenated, {
+        'reference_spectrum_mode': (
+            'projector_rank_with_svd_fallback'
+            if fallback_blocks else 'projector_rank_exact'
+        ),
+        'projector_fast_blocks': fast_blocks,
+        'svd_fallback_blocks': fallback_blocks,
+        'max_projector_symmetry_error': max_symmetry_error,
+        'max_projector_trace_rank_error': max_trace_error,
+        'max_projector_frobenius_rank_error': max_frobenius_rank_error,
+    }
 
 
 def _seed_everything(seed: int) -> None:
@@ -118,6 +279,7 @@ class M3Orchestrator:
         self.guard = SessionGuard(config)
         self.logger = JsonlLogger(run_root / 'logs' / 'events.jsonl')
         self.last_checkpoint: CheckpointSaveResult | None = None
+        self._operator_cache: dict[int, ArmillaryLinearOperator] = {}
         self.backend: ContractionBackend = select_backend(
             require_cuda=config.require_cuda,
         )
@@ -140,6 +302,101 @@ class M3Orchestrator:
             raise BlockedResourceError('M3 real run lost its required CUDA backend.')
         return self.backend.memory_snapshot()
 
+    def _record_storage_cleanup(
+        self, event: str, payload: dict[str, Any],
+    ) -> None:
+        path = self.run_root / 'reports' / 'M3_storage_cleanup.json'
+        current = read_json(path) if path.is_file() else {}
+        if not isinstance(current, dict):
+            current = {}
+        events = current.get('events')
+        if not isinstance(events, list):
+            events = []
+        entry = {'event': event, 'recorded_at': utc_now(), **payload}
+        events.append(entry)
+        events = events[-100:]
+        total = int(current.get('total_bytes_freed', 0)) + int(
+            payload.get('bytes_freed', 0)
+        )
+        atomic_write_json(path, {
+            'schema_version': 1, 'run_id': self.state.run_id,
+            'updated_at': utc_now(), 'total_bytes_freed': total,
+            'events': events,
+        })
+
+    def _prune_old_checkpoints(self) -> dict[str, Any]:
+        result = _prune_committed_checkpoints(
+            self.run_root / 'checkpoints', keep=_checkpoint_keep_count(),
+        )
+        if result['removed'] or result['skipped_symlinks']:
+            self._record_storage_cleanup('keep_latest_checkpoints', result)
+            self.logger.emit(
+                'm3_checkpoints_pruned', run_id=self.state.run_id, **result,
+            )
+        return result
+
+    def _cleanup_completed_run(self) -> dict[str, Any]:
+        '''Remove regenerable cache and obsolete attempts after final checkpoint.'''
+        freed = 0
+        removed_attempts = 0
+        removed_temporary = 0
+        referenced: set[Path] = set()
+        for item in self.queue.items.values():
+            if not item.result_relpath:
+                continue
+            try:
+                referenced.add((self.run_root / item.result_relpath).resolve().parent)
+            except OSError:
+                continue
+        artifacts = self.run_root / 'artifacts'
+        if artifacts.is_dir():
+            for item_root in artifacts.iterdir():
+                if item_root.is_symlink() or not item_root.is_dir():
+                    continue
+                for attempt in item_root.iterdir():
+                    if attempt.is_symlink() or not attempt.is_dir():
+                        continue
+                    if attempt.name.startswith('.tmp-attempt-'):
+                        size = _directory_size(attempt)
+                        shutil.rmtree(attempt)
+                        freed += size
+                        removed_temporary += 1
+                    elif (
+                        attempt.name.startswith('attempt_')
+                        and attempt.resolve() not in referenced
+                    ):
+                        size = _directory_size(attempt)
+                        shutil.rmtree(attempt)
+                        freed += size
+                        removed_attempts += 1
+        cache = self.run_root / 'cache'
+        removed_cache_files = 0
+        if cache.is_dir() and not cache.is_symlink():
+            for child in list(cache.iterdir()):
+                if child.is_symlink():
+                    continue
+                size = _directory_size(child) if child.is_dir() else child.stat().st_size
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+                freed += size
+                removed_cache_files += 1
+        payload = {
+            'removed_attempts': removed_attempts,
+            'removed_temporary_attempts': removed_temporary,
+            'removed_cache_entries': removed_cache_files,
+            'bytes_freed': freed,
+            'final_checkpoint_retained_for_m4': True,
+            'note': (
+                'The newest M3 checkpoint is retained because M4 consumes the '
+                'RSVD/Triad tensors. Full checkpoint stripping is safe only after '
+                'downstream M4/M5/M6 progress.'
+            ),
+        }
+        self._record_storage_cleanup('m3_complete_cleanup', payload)
+        return payload
+
     def checkpoint(self, reason: str) -> CheckpointSaveResult:
         self.state.assert_m3_safe()
         memory = self._memory_headroom(checkpoint=True)
@@ -149,21 +406,28 @@ class M3Orchestrator:
         result = self.checkpoints.save(self.state, self.queue, self.tensors)
         self.guard.mark_checkpoint()
         self.last_checkpoint = result
+        cleanup = self._prune_old_checkpoints()
         self.logger.emit(
             'm3_checkpoint_committed', run_id=self.state.run_id,
             checkpoint=result.index, reason=reason, size_bytes=result.size_bytes,
+            old_checkpoints_removed=cleanup['removed'],
+            bytes_freed=cleanup['bytes_freed'],
         )
         print(f'M3 checkpoint {result.index:06d} committed and verified: {result.path}')
         return result
 
     def _operator(self, sectors_per_shard: int | None = None) -> ArmillaryLinearOperator:
-        return build_armillary_operator(
-            self.parent_tensors, self.backend, self.path_cache_path,
-            sectors_per_shard=(
-                sectors_per_shard or self.config.initial_sector_shard_size
-            ),
-            j2_max=self.config.j2_max,
+        shard_size = int(
+            sectors_per_shard or self.config.initial_sector_shard_size
         )
+        cached = self._operator_cache.get(shard_size)
+        if cached is None:
+            cached = build_armillary_operator(
+                self.parent_tensors, self.backend, self.path_cache_path,
+                sectors_per_shard=shard_size, j2_max=self.config.j2_max,
+            )
+            self._operator_cache[shard_size] = cached
+        return cached
 
     def _next_pending(self) -> WorkItem | None:
         for phase in M3_PHASES:
@@ -215,12 +479,12 @@ class M3Orchestrator:
         rng = np.random.default_rng(self.config.seed)
         x = rng.standard_normal(operator.dimension)
         y = rng.standard_normal(operator.dimension)
-        explicit = operator.explicit_matrix()
+        reference = _blockwise_reference_matvec(operator, x)
         started = time.monotonic()
         matrix_free = operator.matvec(x)
         self.backend.synchronize()
         matvec_s = time.monotonic() - started
-        error = float(np.max(np.abs(matrix_free - explicit @ x)))
+        error = float(np.max(np.abs(matrix_free - reference)))
         left = float(np.vdot(matrix_free, y))
         right = float(np.vdot(x, operator.rmatvec(y)))
         adjoint_error = abs(left - right) / max(1.0, abs(left), abs(right))
@@ -237,6 +501,7 @@ class M3Orchestrator:
             or not reused
         ):
             raise ArithmeticError('M3 matrix-free validation failed closed.')
+        dense_bytes = int(operator.dimension) ** 2 * np.dtype(np.float64).itemsize
         return {
             'status': 'PASS', 'dimension': operator.dimension,
             'matvec_max_abs_error': error,
@@ -245,7 +510,9 @@ class M3Orchestrator:
             'path_cache_reused': reused,
             'path_cache_before': stats_before,
             'path_cache_after': stats_after,
-            'explicit_matrix_bytes': explicit.nbytes,
+            'reference_mode': 'block_explicit_no_global_dense',
+            'explicit_matrix_bytes': 0,
+            'avoided_dense_matrix_bytes': dense_bytes,
             'gpu_memory_after': self.backend.memory_snapshot(),
         }
 
@@ -256,12 +523,21 @@ class M3Orchestrator:
             nonlocal selected_operator
             self._memory_headroom(checkpoint=False)
             selected_operator = self._operator(shard_size)
-            return randomized_svd(
-                selected_operator, target_rank=self.config.target_rank,
-                oversampling=self.config.oversampling,
-                power_iterations=self.config.power_iterations,
-                seed=self.config.seed,
-            )
+            try:
+                return randomized_svd(
+                    selected_operator, target_rank=self.config.target_rank,
+                    oversampling=self.config.oversampling,
+                    power_iterations=self.config.power_iterations,
+                    seed=self.config.seed,
+                )
+            except Exception:
+                # Do not retain a failed/OOM operator instance in the cache.
+                self._operator_cache.pop(int(shard_size), None)
+                selected_operator = None
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                raise
 
         recovered = run_with_oom_recovery(
             compute, self.config.initial_sector_shard_size,
@@ -271,14 +547,14 @@ class M3Orchestrator:
         result = recovered.value
         if selected_operator is None:
             raise RuntimeError('M3 RSVD failed to retain its operator.')
-        explicit_values = np.sort(np.concatenate([
-            np.linalg.svd(
-                block.weight * block.projector, compute_uv=False,
-            )
-            for block in selected_operator.blocks
-        ]))[::-1]
+        explicit_values, reference_metadata = _reference_singular_values(
+            selected_operator,
+        )
+        reference_top = np.zeros(self.config.target_rank, dtype=np.float64)
+        copied = min(self.config.target_rank, explicit_values.size)
+        reference_top[:copied] = explicit_values[:copied]
         explicit_error = float(np.max(np.abs(
-            result.singular_values - explicit_values[:self.config.target_rank]
+            result.singular_values - reference_top
         )))
         optimal_residual = float(np.linalg.norm(
             explicit_values[self.config.target_rank:]
@@ -299,6 +575,7 @@ class M3Orchestrator:
             **summary,
             'explicit_top_singular_max_abs_error': explicit_error,
             'explicit_optimal_residual_frobenius': optimal_residual,
+            **reference_metadata,
             'residual_to_explicit_optimal_ratio': ratio,
             'influence_proxy': influence_proxy(result),
             'final_sector_shard_size': recovered.final_shard_size,
@@ -468,6 +745,8 @@ class M3Orchestrator:
         self.state.assert_m3_safe()
         acceptance = self.run_root / 'reports' / 'M3_acceptance.json'
         if self.state.phase == 'M3_COMPLETE' and acceptance.is_file():
+            self._prune_old_checkpoints()
+            self._cleanup_completed_run()
             return self._summary('M3 already complete; no work was started')
         self.state.phase = 'M3_RUNNING'
         self.logger.emit('m3_session_started', run_id=self.state.run_id)
@@ -504,6 +783,7 @@ class M3Orchestrator:
                 }
                 self.state.phase = 'M3_COMPLETE'
                 final_checkpoint = self.checkpoint('M3 acceptance gates complete')
+                self._cleanup_completed_run()
                 paths = write_m3_report_package(
                     self.run_root, self.config, self.state, self.queue,
                     self.test_report, final_checkpoint, self.manifest,

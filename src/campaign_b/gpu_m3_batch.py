@@ -586,6 +586,9 @@ def run_one_gpu_m3(
         'consecutive_failures': prev_fail,
     })
     os.environ.setdefault('VALIDATED_RG_M3_ALLOW_CODE_DRIFT', '1')
+    # In-orchestrator prune after each verified ckpt (default keep=1).
+    # Complements Campaign B keep-latest reclaim; do not raise min to >1 here.
+    os.environ.setdefault('VALIDATED_RG_M3_CHECKPOINT_KEEP', '1')
     orch = create_or_resume_m3(
         Path(persistent_root),
         config,

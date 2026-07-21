@@ -258,6 +258,9 @@ NaN/Inf で JSON シリアライズに失敗したセッションは fail-closed
 
 数値: FP64 必須、TF32 無効、deterministic algorithms。  
 バッチは `VALIDATED_RG_M3_ALLOW_CODE_DRIFT=1` を setdefault（source/notebook hash drift でも resume 可；config_hash と M2 parent ピンは維持）。
+あわせて `VALIDATED_RG_M3_CHECKPOINT_KEEP=1` を setdefault（検証済み ckpt 直後に
+同一 run の古い COMMITTED を prune。詳細は
+[campaign_b_m3_storage_reclaim.md](./campaign_b_m3_storage_reclaim.md) §3b）。
 
 `run_until_checkpoint` は「次の item を安全に始められない」「drain/final/hard return」「全フェーズ完了」のいずれかで戻る。未完了なら `GPU_M3.json` は `M3_CHECKPOINT` → 再実行で resume。
 
@@ -296,9 +299,13 @@ runs/{M3-...}/
 - **入力:** 同じ作用素。
 - **操作:**
   1. 乱数ベクトル `x,y`。
-  2. matrix-free `matvec(x)` と dense `explicit_matrix() @ x` の max abs 誤差 ≤ 1e-12。
+  2. matrix-free `matvec(x)` と **block-explicit CPU reference**（大域 dense 行列を
+     立てない）の max abs 誤差 ≤ 1e-12。`j2_max=2` では約 17 GiB の
+     `46656²` FP64 割り当てを回避。
   3. 随伴整合: `<Ax,y>` vs `<x,A*y>` 相対誤差 ≤ 1e-12。
   4. path cache が 2 回目 matvec で hit すること。
+- **出力メモ:** `reference_mode=block_explicit_no_global_dense`、
+  `avoided_dense_matrix_bytes`、`explicit_matrix_bytes=0`。
 - **失敗:** いずれか非有限または閾値超過 → fail-closed。
 
 #### Phase D — `M3_RSVD`
@@ -308,10 +315,17 @@ runs/{M3-...}/
   1. GPU 上で Gaussian `Ω`（列数 = target_rank + oversampling）。
   2. `Y = A Ω`、power iteration（QR 直交化を挟んだ `(A A*)^q` 風サンプル）。
   3. 左基底から縮小系の SVD → 上位 `target_rank` の `U, Σ, Vᵀ`。
-  4. OOM 時は `sectors_per_shard` を下げて再試行。
-  5. **検証:** 各 sector ブロックの `weight * projector` の特異値を明示 SVD で連結ソートし、上位 rank と max abs 誤差 ≤ 1e-5；残差 Frobenius が「明示最適残差」比 ≤ 1.00001。
-- **出力:** singular values、残差、`influence_proxy`（ヒューリスティック）、テンソル `rsvd_*` を checkpoint に保存。
+  4. OOM 時は `sectors_per_shard` を下げて再試行（失敗/OOM した operator は
+     shard キャッシュから外し、再構築する）。
+  5. **検証:** 安全な直交 projector ブロックは rank スペクトル
+    （`|weight|` を rank 回）を使い、診断に落ちたブロックだけ明示 SVD に
+     fallback。上位 rank と max abs 誤差 ≤ 1e-5；残差 Frobenius が
+     「参照最適残差」比 ≤ 1.00001。
+- **出力:** singular values、残差、`influence_proxy`（ヒューリスティック）、
+  `reference_spectrum_mode`、テンソル `rsvd_*` を checkpoint に保存。
 - **厳密性:** `rigor: EXPLORATORY_FIXED_SEED_NOT_A_CERTIFICATE`。証明書に使わない。
+- **高速化メモ:** 作用素インスタンスは `sectors_per_shard` ごとにキャッシュし、
+  build / validate / RSVD / Triad で再利用。
 
 #### Phase E — `M3_TRIAD`
 

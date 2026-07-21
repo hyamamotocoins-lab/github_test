@@ -69,6 +69,21 @@ python scripts/persist_reclaim_m3.py --mode keep-latest-checkpoint --execute
 - 各 M3 セッションの resume 前・セッション後に、その run だけ trim（再蓄積防止）
 - CLI: `--mode keep-latest-checkpoint`（一括・緊急用。96/97 再実行後は通常不要）
 
+#### 3b. M3 orchestrator 内 prune（実装済み）
+
+`src/m3_orchestrator.py` は **検証済みチェックポイント保存の直後**に、
+同一 run の古い `COMMITTED` `ckpt_*` を prune する（symlink は追わない）。
+
+| env | 既定 | 意味 |
+|-----|------|------|
+| `VALIDATED_RG_M3_CHECKPOINT_KEEP` | `1`（範囲 1–8） | 最新 N 個だけ残す |
+
+`gpu_m3_batch` は `setdefault(..., '1')`。汎用の `VALIDATED_RG_CHECKPOINT_KEEP`
+（CheckpointManager、下限 2）とは別ノブ。M3 完了後は obsolete attempt /
+一時 attempt / regenerable `cache/` も掃除し、`reports/M3_storage_cleanup.json`
+に会計を書く。**最新 final ckpt は M4 親として残す**（下流完了後の strip は
+本ドキュメント §1–2）。
+
 ### 4. tensors のみ削除（実装済み）
 
 - 同一 fail-closed 基準で `checkpoints/*/tensors/`（および類似 bulky 名）のみ削除
