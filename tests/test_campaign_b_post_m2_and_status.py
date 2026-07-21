@@ -39,15 +39,39 @@ def test_status_read_only_and_counts_queues(tmp_path: Path) -> None:
         status = collect_pipeline_status(tmp_path)
 
     assert status['read_only'] is True
+    assert status['write_status_snapshot'] is False
+    assert 'status_snapshot_path' not in status
     assert status['queues']['gpu_m3'] == 2
     assert status['queues']['m6'] == 3
     assert status['candidate_states']['SELECTED'] == 1
     assert status['candidate_states']['WAITING_FOR_M2'] == 1
     assert status['m2']['m2_ready_count'] == 1
     assert status['certification_status'] == CERTIFICATION_STATUS
+    # Default path must not write under persist (quota-safe / truly read-only).
+    assert not (tmp_path / 'campaign_b' / '_status_dashboard').exists()
     # Ensure queue.json not mutated
     q = (camp / 'queue.json').read_text(encoding='utf-8')
     assert 'SELECTED' in q
+
+
+def test_status_optional_snapshot_write(tmp_path: Path) -> None:
+    with (
+        patch('src.campaign_b.gpu_m3_batch.list_gpu_m3_queue', return_value=[]),
+        patch('src.campaign_b.pre_m6_batch.list_pre_m6_queue', return_value=[]),
+        patch('src.campaign_b.close_obligations.list_obligation_queue', return_value=[]),
+        patch('src.campaign_b.m6_batch.list_m6_queue', return_value=[]),
+        patch(
+            'src.campaign_b.advance_selected.discover_selected_packages',
+            return_value=[],
+        ),
+    ):
+        status = collect_pipeline_status(tmp_path, write_status_snapshot=True)
+    dash = tmp_path / 'campaign_b' / '_status_dashboard'
+    assert dash.is_dir()
+    assert (dash / 'LATEST_STATUS.json').is_file()
+    assert status['write_status_snapshot'] is True
+    assert status['status_snapshot_path']
+    assert Path(status['status_snapshot_path']).is_file()
 
 
 def test_find_m2_ready_markers(tmp_path: Path) -> None:

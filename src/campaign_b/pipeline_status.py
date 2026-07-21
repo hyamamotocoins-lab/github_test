@@ -137,8 +137,41 @@ def _selected_package_counts(persistent_root: Path) -> dict[str, Any]:
     }
 
 
-def collect_pipeline_status(persistent_root: Path) -> dict[str, Any]:
-    """Assemble a read-only status snapshot."""
+def _maybe_write_status_snapshot(
+    persistent_root: Path,
+    status: dict[str, Any],
+    *,
+    write_status_snapshot: bool,
+) -> str | None:
+    """Optionally persist a status JSON under campaign_b/_status_dashboard/.
+
+    Default is off so notebook 98 stays usable when disk quota blocks writes.
+    """
+    if not write_status_snapshot:
+        return None
+    from ..common import atomic_write_json
+
+    out_dir = Path(persistent_root) / 'campaign_b' / '_status_dashboard'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = str(status.get('scanned_at') or utc_now()).replace(':', '').replace('+', '_')
+    out_path = out_dir / f'status_{stamp}.json'
+    atomic_write_json(out_path, status)
+    atomic_write_json(out_dir / 'LATEST_STATUS.json', status)
+    return str(out_path)
+
+
+def collect_pipeline_status(
+    persistent_root: Path,
+    *,
+    write_status_snapshot: bool = False,
+) -> dict[str, Any]:
+    """Assemble a read-only status snapshot.
+
+    Never mutates compute state, locks, leases, or queues. By default performs
+    no writes under ``persistent_root`` (safe under disk quota). Set
+    ``write_status_snapshot=True`` only to optionally dump under
+    ``campaign_b/_status_dashboard/``.
+    """
     persistent_root = Path(persistent_root)
     from .gpu_m3_batch import list_gpu_m3_queue
     from .m6_batch import list_m6_queue
@@ -176,6 +209,7 @@ def collect_pipeline_status(persistent_root: Path) -> dict[str, Any]:
         'scanned_at': utc_now(),
         'persistent_root': str(persistent_root),
         'read_only': True,
+        'write_status_snapshot': bool(write_status_snapshot),
         'm2': _m2_summary(persistent_root),
         'candidate_states': _count_candidate_states(persistent_root),
         'queues': queues,
@@ -196,13 +230,22 @@ def collect_pipeline_status(persistent_root: Path) -> dict[str, Any]:
             'NEED_CANONICAL_M2 instead.'
         ),
         'note': (
-            'Notebook 98 read-only dashboard. No locks, leases, or statuses mutated.'
+            'Notebook 98 read-only dashboard. No locks, leases, or statuses mutated. '
+            'No validate_persistent_root write probe; optional _status_dashboard '
+            'snapshot is off by default.'
         ),
         **screening_only_payload(),
     }
+    snapshot_path = _maybe_write_status_snapshot(
+        persistent_root,
+        status,
+        write_status_snapshot=write_status_snapshot,
+    )
+    if snapshot_path is not None:
+        status['status_snapshot_path'] = snapshot_path
     return status
 
 
 def format_status_text(status: dict[str, Any]) -> str:
-    """Human-readable text block for notebook display."""
+    """Human-readable text block for notebook display (no filesystem writes)."""
     return json.dumps(status, indent=2, ensure_ascii=False, default=str)
