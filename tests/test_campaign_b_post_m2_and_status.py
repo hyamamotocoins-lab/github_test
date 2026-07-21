@@ -67,6 +67,8 @@ def test_post_m2_defaults_drain_via_pipeline_to_m6(tmp_path: Path) -> None:
         'started_at': 't0',
         'rounds_run': 2,
         'totals': {'m3_complete': 3, 'advanced': 1},
+        'auto_strip_m3_checkpoints': True,
+        'm3_reclaim': {'stripped': 2, 'bytes_freed': 1000, 'bytes_freed_human': '1000 B'},
         'certification_status': CERTIFICATION_STATUS,
         'claim_scope': CLAIM_SCOPE,
     }
@@ -88,19 +90,48 @@ def test_post_m2_defaults_drain_via_pipeline_to_m6(tmp_path: Path) -> None:
     kwargs = pipe.call_args.kwargs
     assert kwargs['max_rounds'] == 5
     assert kwargs['max_m3_sessions'] == 16
+    assert kwargs['auto_strip_m3_checkpoints'] is True
     assert summary['notebook'] == 97
     assert summary['mode'] == 'drain_existing_backlog'
     assert summary['drain_existing_backlog'] is True
     assert summary['skip_screening'] is True
+    assert summary['auto_strip_m3_checkpoints'] is True
+    assert summary['m3_reclaim']['stripped'] == 2
     assert summary['gpu_workers'] == 1
     assert summary['pipeline_to_m6']['session_id'] == 'PIPE-mock'
     assert summary['pipeline_to_m6']['totals']['m3_complete'] == 3
     assert 'end_to_end' not in summary
     assert '95-equivalent' in summary['note']
     assert 'backlog growth is OK' in summary['note']
+    assert 'Auto-strip M3 checkpoints ON' in summary['note']
     assert summary['certification_status'] == CERTIFICATION_STATUS
     ledger = tmp_path / 'campaign_b' / '_post_m2' / 'LATEST_POST_M2_SESSION.json'
     assert ledger.is_file()
+
+
+def test_post_m2_can_disable_auto_strip(tmp_path: Path) -> None:
+    fake = {
+        'session_id': 'PIPE-mock',
+        'started_at': 't0',
+        'rounds_run': 1,
+        'totals': {},
+        'auto_strip_m3_checkpoints': False,
+        'm3_reclaim': {'stripped': 0, 'bytes_freed': 0, 'bytes_freed_human': '0 B'},
+        'certification_status': CERTIFICATION_STATUS,
+        'claim_scope': CLAIM_SCOPE,
+    }
+    with patch(
+        'src.campaign_b.pipeline_to_m6.run_pipeline_to_m6',
+        return_value=fake,
+    ) as pipe:
+        summary = run_post_m2_pipeline(
+            persistent_root=tmp_path,
+            project_root=tmp_path,
+            auto_strip_m3_checkpoints=False,
+        )
+    assert pipe.call_args.kwargs['auto_strip_m3_checkpoints'] is False
+    assert summary['auto_strip_m3_checkpoints'] is False
+    assert 'Auto-strip M3 checkpoints OFF' in summary['note']
 
 
 def test_post_m2_opt_in_end_to_end_screening_path(tmp_path: Path) -> None:

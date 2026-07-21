@@ -1,4 +1,4 @@
-"""CPU unit tests for scripts/persist_reclaim_m3.py."""
+"""CPU unit tests for scripts/persist_reclaim_m3.py and src.campaign_b.m3_reclaim."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from src.campaign_b import m3_reclaim as lib
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / 'scripts' / 'persist_reclaim_m3.py'
@@ -148,6 +150,63 @@ def test_classify_and_strip_safe_complete_downstream(reclaim, tmp_path: Path) ->
     assert (root / 'runs' / m3_safe / 'run_config.json').is_file()
     # Incomplete-downstream untouched.
     assert (root / 'runs' / m3_need / 'checkpoints' / 'ckpt_000001' / 'tensors').is_dir()
+
+
+def test_library_strip_eligible_matches_cli(tmp_path: Path) -> None:
+    root = tmp_path / 'persist'
+    m3 = 'M3-lib-safe'
+    m4 = 'M4-lib-safe'
+    _m3_complete_tree(root / 'runs' / m3, ckpt_blob=900)
+    _m4_complete(root, m4)
+    _package(root, campaign='camp1', name='pkg', m3=m3, m4=m4)
+
+    summary = lib.strip_eligible_m3_checkpoints(root, execute=True)
+    assert summary.stripped == 1
+    assert summary.bytes_freed > 0
+    assert (root / 'runs' / m3 / 'checkpoints' / 'STRIPPED_FOR_RECLAIM.json').is_file()
+    assert (root / 'runs' / m3 / 'reports' / 'M3_report.json').is_file()
+
+
+def test_incremental_only_run_ids(tmp_path: Path) -> None:
+    root = tmp_path / 'persist'
+    m3_a = 'M3-inc-a'
+    m3_b = 'M3-inc-b'
+    m4_a = 'M4-inc-a'
+    m4_b = 'M4-inc-b'
+    _m3_complete_tree(root / 'runs' / m3_a, ckpt_blob=500)
+    _m3_complete_tree(root / 'runs' / m3_b, ckpt_blob=500)
+    _m4_complete(root, m4_a)
+    _m4_complete(root, m4_b)
+    _package(root, campaign='camp1', name='pkg-a', m3=m3_a, m4=m4_a)
+    _package(root, campaign='camp1', name='pkg-b', m3=m3_b, m4=m4_b)
+
+    summary = lib.strip_eligible_m3_checkpoints(
+        root, execute=True, only_run_ids={m3_a},
+    )
+    assert summary.scope == 'incremental'
+    assert summary.run_ids == [m3_a]
+    assert (root / 'runs' / m3_a / 'checkpoints' / 'STRIPPED_FOR_RECLAIM.json').is_file()
+    assert (root / 'runs' / m3_b / 'checkpoints' / 'ckpt_000001').is_dir()
+
+
+def test_auto_strip_after_round_uses_pre_m6_package(tmp_path: Path) -> None:
+    root = tmp_path / 'persist'
+    m3 = 'M3-round-a'
+    m4 = 'M4-round-a'
+    pkg = _package(root, campaign='camp1', name='pkg-round', m3=m3, m4=m4)
+    _m3_complete_tree(root / 'runs' / m3, ckpt_blob=400)
+    _m4_complete(root, m4)
+
+    out = lib.auto_strip_after_pipeline_round(
+        root,
+        pre_m6_summary={
+            'results': [{'package': str(pkg), 'status': 'PRE_M6_READY'}],
+        },
+        execute=True,
+    )
+    assert out['scope'] == 'incremental'
+    assert out['stripped'] == 1
+    assert m3 in out['preferred_run_ids']
 
 
 def test_skip_certified_lineage_unless_flag(reclaim, tmp_path: Path) -> None:

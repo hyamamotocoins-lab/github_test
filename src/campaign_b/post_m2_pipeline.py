@@ -49,6 +49,8 @@ class PostM2Config:
     # Defaults: 95-equivalent consumer (no new screening).
     skip_screening: bool = True
     drain_existing_backlog: bool = True
+    # After M4+ consumes M3, strip M3 checkpoints (fail-closed criteria).
+    auto_strip_m3_checkpoints: bool = True
 
 
 def _ledger_root(persistent_root: Path) -> Path:
@@ -95,6 +97,7 @@ def run_post_m2_pipeline(
     skip_screening: bool = True,
     drain_existing_backlog: bool = True,
     disable_session_wallclock: bool = True,
+    auto_strip_m3_checkpoints: bool = True,
 ) -> dict[str, Any]:
     """Drain M2-ready backlog (default) or run backlog-aware end-to-end.
 
@@ -105,6 +108,11 @@ def run_post_m2_pipeline(
 
     When ``drain_existing_backlog=False``: Phase-1 ``run_end_to_end`` loop
     (M3-first, optional screening when backlog thin).
+
+    ``auto_strip_m3_checkpoints`` (default True): after each pipeline round,
+    delete M3 ``checkpoints/`` for runs already consumed by M4+ (same
+    fail-closed criteria as ``scripts/persist_reclaim_m3.py``). Ledger records
+    stripped count / GiB. See ``docs/campaign_b_m3_storage_reclaim.md``.
 
     Recommended ops: notebook 89 (producer) ∥ this consumer. Backlog growth is OK.
     Exclusive GPU lane lease under campaign_b/_locks/gpu_lane.json — do not run
@@ -130,6 +138,7 @@ def run_post_m2_pipeline(
         disable_session_wallclock=disable_session_wallclock,
         skip_screening=skip_screening,
         drain_existing_backlog=drain_existing_backlog,
+        auto_strip_m3_checkpoints=bool(auto_strip_m3_checkpoints),
     )
     if cfg.disable_session_wallclock:
         os.environ[_DISABLE_WALLCLOCK_ENV] = '1'
@@ -154,13 +163,17 @@ def run_post_m2_pipeline(
                 max_m6_packages=cfg.max_m6_packages,
                 max_queue=cfg.max_queue,
                 only_campaign_run_id=cfg.only_campaign_run_id,
+                auto_strip_m3_checkpoints=cfg.auto_strip_m3_checkpoints,
             )
             mode = 'drain_existing_backlog'
             inner_key = 'pipeline_to_m6'
+            m3_reclaim = inner.get('m3_reclaim') or {}
             inner_summary = {
                 'session_id': inner.get('session_id'),
                 'rounds_run': inner.get('rounds_run'),
                 'totals': inner.get('totals'),
+                'auto_strip_m3_checkpoints': inner.get('auto_strip_m3_checkpoints'),
+                'm3_reclaim': m3_reclaim,
             }
             note = (
                 'Notebook 97 post-M2 consumer (95-equivalent). '
@@ -169,10 +182,18 @@ def run_post_m2_pipeline(
                 'advance → M3 → M6. Screening off by default. '
                 'M2_READY markers are informational only (not a wait gate). '
                 'GPU lane lease held; do not run concurrently with notebook 96. '
-                'NOT_CERTIFIED / SCREENING_ONLY.'
+                + (
+                    f"Auto-strip M3 checkpoints ON "
+                    f"(stripped={m3_reclaim.get('stripped', 0)}, "
+                    f"freed≈{m3_reclaim.get('bytes_freed_human', '0 B')}). "
+                    if cfg.auto_strip_m3_checkpoints
+                    else 'Auto-strip M3 checkpoints OFF. '
+                )
+                + 'NOT_CERTIFIED / SCREENING_ONLY.'
             )
         else:
             from .end_to_end import EndToEndConfig, run_end_to_end
+            from .m3_reclaim import strip_eligible_m3_checkpoints
 
             e2e = EndToEndConfig(
                 persistent_root=cfg.persistent_root,
@@ -193,18 +214,31 @@ def run_post_m2_pipeline(
             )
             # Nested lease with end_to_end acquire_gpu_lock is intentional.
             inner = run_end_to_end(e2e)
+            m3_reclaim: dict[str, Any] = {}
+            if cfg.auto_strip_m3_checkpoints:
+                m3_reclaim = strip_eligible_m3_checkpoints(
+                    cfg.persistent_root, execute=True,
+                ).as_dict()
             mode = 'end_to_end'
             inner_key = 'end_to_end'
             inner_summary = {
                 'session_id': inner.get('session_id'),
                 'rounds_run': inner.get('rounds_run'),
                 'totals': inner.get('totals'),
+                'm3_reclaim': m3_reclaim,
             }
             note = (
                 'Notebook 97 post-M2 pipeline (opt-in end_to_end path). '
                 'Prefer 89∥97 producer-consumer; backlog growth is OK. '
                 'GPU lane lease held; do not run concurrently with notebook 96. '
-                'NOT_CERTIFIED / SCREENING_ONLY.'
+                + (
+                    f"Auto-strip M3 checkpoints ON "
+                    f"(stripped={m3_reclaim.get('stripped', 0)}, "
+                    f"freed≈{m3_reclaim.get('bytes_freed_human', '0 B')}). "
+                    if cfg.auto_strip_m3_checkpoints
+                    else 'Auto-strip M3 checkpoints OFF. '
+                )
+                + 'NOT_CERTIFIED / SCREENING_ONLY.'
             )
 
     summary = {
@@ -214,6 +248,12 @@ def run_post_m2_pipeline(
         'mode': mode,
         'drain_existing_backlog': cfg.drain_existing_backlog,
         'skip_screening': cfg.skip_screening,
+        'auto_strip_m3_checkpoints': cfg.auto_strip_m3_checkpoints,
+        'm3_reclaim': (
+            (inner.get('m3_reclaim') if isinstance(inner.get('m3_reclaim'), dict) else None)
+            or (inner_summary.get('m3_reclaim') if isinstance(inner_summary, dict) else None)
+            or {}
+        ),
         'started_at': inner.get('started_at'),
         'finished_at': utc_now(),
         'gpu_workers': 1,

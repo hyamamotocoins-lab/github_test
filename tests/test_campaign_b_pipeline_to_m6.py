@@ -220,3 +220,80 @@ def test_pipeline_counts_m4_checkpoint_as_progress(tmp_path: Path) -> None:
 
     assert summary['rounds_run'] == 2
     assert summary['rounds'][0]['progress'] == 1
+
+
+def test_pipeline_auto_strips_when_flag_set(tmp_path: Path) -> None:
+    empty = _stage()
+    reclaim_calls: list[dict[str, Any]] = []
+
+    def _reclaim(root: Path, **kwargs: Any) -> dict[str, Any]:
+        reclaim_calls.append({'root': root, **kwargs})
+        return {
+            'execute': True,
+            'scope': 'full_scan',
+            'candidates': 0,
+            'stripped': 1,
+            'skipped': 0,
+            'bytes_freed': 42,
+            'bytes_freed_human': '42 B',
+            'run_ids': ['M3-x'],
+            'actions': [],
+            'preferred_run_ids': [],
+            'fallback_full_scan': True,
+        }
+
+    with (
+        patch('src.campaign_b.advance_selected.run_advance_selected', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.run_gpu_m3_batch', return_value=empty),
+        patch('src.campaign_b.pre_m6_batch.run_pre_m6_batch', return_value=empty),
+        patch(
+            'src.campaign_b.close_obligations.run_close_obligations_batch',
+            return_value=empty,
+        ),
+        patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch(
+            'src.campaign_b.m3_reclaim.auto_strip_after_pipeline_round',
+            side_effect=_reclaim,
+        ),
+    ):
+        summary = run_pipeline_to_m6(
+            persistent_root=tmp_path,
+            project_root=tmp_path,
+            max_rounds=1,
+            auto_strip_m3_checkpoints=True,
+        )
+
+    assert len(reclaim_calls) == 1
+    assert summary['auto_strip_m3_checkpoints'] is True
+    assert summary['m3_reclaim']['stripped'] == 1
+    assert summary['m3_reclaim']['bytes_freed'] == 42
+    assert summary['totals']['m3_checkpoints_stripped'] == 1
+    assert summary['rounds'][0]['m3_reclaim']['stripped'] == 1
+
+
+def test_pipeline_skips_auto_strip_when_disabled(tmp_path: Path) -> None:
+    empty = _stage()
+    with (
+        patch('src.campaign_b.advance_selected.run_advance_selected', return_value=empty),
+        patch('src.campaign_b.gpu_m3_batch.run_gpu_m3_batch', return_value=empty),
+        patch('src.campaign_b.pre_m6_batch.run_pre_m6_batch', return_value=empty),
+        patch(
+            'src.campaign_b.close_obligations.run_close_obligations_batch',
+            return_value=empty,
+        ),
+        patch('src.campaign_b.m6_batch.run_m6_batch', return_value=empty),
+        patch(
+            'src.campaign_b.m3_reclaim.auto_strip_after_pipeline_round',
+        ) as reclaim,
+    ):
+        summary = run_pipeline_to_m6(
+            persistent_root=tmp_path,
+            project_root=tmp_path,
+            max_rounds=1,
+            auto_strip_m3_checkpoints=False,
+        )
+
+    assert not reclaim.called
+    assert summary['auto_strip_m3_checkpoints'] is False
+    assert summary['m3_reclaim']['stripped'] == 0
+    assert 'm3_reclaim' not in summary['rounds'][0]

@@ -38,6 +38,7 @@ def run_pipeline_to_m6(
     skip_pre_m6: bool = False,
     skip_obligations: bool = False,
     skip_m6: bool = False,
+    auto_strip_m3_checkpoints: bool = True,
 ) -> dict[str, Any]:
     """Run stages 90→91→92→93→94 in order for up to max_rounds passes.
 
@@ -45,11 +46,17 @@ def run_pipeline_to_m6(
     notebook 89 SELECTED can be drained by raising max_rounds, without
     spinning forever on a stuck queue). Never calls production gate 81.
     Summary certification_status is always NOT_CERTIFIED / SCREENING_ONLY.
+
+    When ``auto_strip_m3_checkpoints`` is True (default for notebook 97),
+    after each round strips M3 ``checkpoints/`` for runs that already have
+    fail-closed-safe downstream (M4_COMPLETE / M5 / M6). Never deletes
+    packages or reports. See ``docs/campaign_b_m3_storage_reclaim.md``.
     """
     from .advance_selected import run_advance_selected
     from .close_obligations import run_close_obligations_batch
     from .execution_keys import gpu_lane_lease
     from .gpu_m3_batch import run_gpu_m3_batch
+    from .m3_reclaim import auto_strip_after_pipeline_round, fmt_bytes
     from .m6_batch import run_m6_batch
     from .pre_m6_batch import run_pre_m6_batch
 
@@ -57,6 +64,11 @@ def run_pipeline_to_m6(
     project_root = Path(project_root)
     started = utc_now()
     rounds: list[dict[str, Any]] = []
+    reclaim_totals = {
+        'stripped': 0,
+        'bytes_freed': 0,
+        'rounds_with_reclaim': 0,
+    }
 
     with gpu_lane_lease(persistent_root, owner='pipeline_to_m6'):
         for round_index in range(1, int(max_rounds) + 1):
@@ -66,6 +78,8 @@ def run_pipeline_to_m6(
                 'stages': {},
             }
             progress = 0
+            pre: dict[str, Any] | None = None
+            m6: dict[str, Any] | None = None
 
             if not skip_advance:
                 adv = run_advance_selected(
@@ -162,12 +176,26 @@ def run_pipeline_to_m6(
                 }
                 progress += int(m6.get('m6_complete') or 0)
 
+            if auto_strip_m3_checkpoints:
+                reclaim = auto_strip_after_pipeline_round(
+                    persistent_root,
+                    pre_m6_summary=pre,
+                    m6_summary=m6,
+                    execute=True,
+                )
+                round_doc['m3_reclaim'] = reclaim
+                reclaim_totals['stripped'] += int(reclaim.get('stripped') or 0)
+                reclaim_totals['bytes_freed'] += int(reclaim.get('bytes_freed') or 0)
+                if int(reclaim.get('stripped') or 0) > 0:
+                    reclaim_totals['rounds_with_reclaim'] += 1
+
             round_doc['finished_at'] = utc_now()
             round_doc['progress'] = progress
             rounds.append(round_doc)
             if progress == 0:
                 break
 
+    reclaim_totals['bytes_freed_human'] = fmt_bytes(int(reclaim_totals['bytes_freed']))
     summary = {
         'schema_version': 1,
         'session_id': f"PIPE-{utc_now().replace(':', '').replace('-', '')[:15]}Z",
@@ -176,6 +204,8 @@ def run_pipeline_to_m6(
         'rounds_run': len(rounds),
         'max_rounds': max_rounds,
         'only_campaign_run_id': only_campaign_run_id,
+        'auto_strip_m3_checkpoints': bool(auto_strip_m3_checkpoints),
+        'm3_reclaim': reclaim_totals,
         'totals': {
             'advanced': sum(
                 int((r.get('stages') or {}).get('advance', {}).get('advanced') or 0)
@@ -214,6 +244,8 @@ def run_pipeline_to_m6(
                 )
                 for r in rounds
             ),
+            'm3_checkpoints_stripped': reclaim_totals['stripped'],
+            'm3_reclaim_bytes_freed': reclaim_totals['bytes_freed'],
         },
         'rounds': rounds,
         'note': (
@@ -221,7 +253,14 @@ def run_pipeline_to_m6(
             'Does not run production paperspace M6 gate 81. '
             'Re-run while 89 continues to pick up new SELECTED. '
             'Holds exclusive GPU lane lease under campaign_b/_locks/gpu_lane.json. '
-            'NOT_CERTIFIED / SCREENING_ONLY.'
+            + (
+                'Auto-strips safe M3 checkpoints after each round '
+                f"(stripped={reclaim_totals['stripped']}, "
+                f"freed≈{reclaim_totals['bytes_freed_human']}). "
+                if auto_strip_m3_checkpoints
+                else 'M3 auto-strip disabled for this session. '
+            )
+            + 'NOT_CERTIFIED / SCREENING_ONLY.'
         ),
         **screening_only_payload(),
     }
