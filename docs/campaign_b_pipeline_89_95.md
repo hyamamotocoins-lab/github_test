@@ -210,9 +210,20 @@ campaign_b/{campaign_run_id}/selected/{candidate_id}/
 
 ソートキー（昇順）:
 
-1. `M3_RUNNING` / `M3_CHECKPOINT` を最優先（resume）。
-2. それ以外は `q_upper` 昇順（小さい q を先に）。
-3. パス文字列でタイブレーク。
+1. `queue_tier` 0: 健全な `M3_RUNNING` / `M3_CHECKPOINT`（resume 優先）。
+2. `queue_tier` 1: 未着手 READY（`GPU_M3` なし）など。
+3. `queue_tier` 2: 繰り返し失敗 / エラー（通常はデフォルトキューから除外）。
+4. 同一 tier 内は `q_upper` 昇順、パスでタイブレーク。
+
+デフォルト除外（`include_errors=False`）:
+
+- `M3_COMPLETE` / `M3_BLOCKED_BAD_M2` / `M3_BLOCKED_NONFINITE`
+- `M3_ERROR`
+- `consecutive_failures >= 2` の再開候補
+
+NaN/Inf で JSON シリアライズに失敗したセッションは fail-closed で
+`M3_BLOCKED_NONFINITE`（`nonfinite_values_present: true`、**CERTIFIED にしない**）。
+`--include-errors` / `include_errors=True` で再試行可能。
 
 バッチは `max_sessions` 件だけ **逐次** `run_one_gpu_m3`（単一 GPU 前提）。
 

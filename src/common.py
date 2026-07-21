@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -12,6 +13,53 @@ from typing import Any, Iterable
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def sanitize_for_json(obj: Any) -> tuple[Any, bool]:
+    """Replace non-finite floats with ``None`` for JSON serialization.
+
+    Returns ``(cleaned, nonfinite_values_present)``. Callers MUST record the
+    flag and must NOT emit ``CERTIFIED`` from sanitized exploratory payloads —
+    nullified floats are diagnostic only, never a rigorous bound.
+    """
+    found = False
+
+    def walk(value: Any) -> Any:
+        nonlocal found
+        if value is None or isinstance(value, (str, bytes, bool)):
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                found = True
+                return None
+            return value
+        if isinstance(value, complex):
+            if not (math.isfinite(value.real) and math.isfinite(value.imag)):
+                found = True
+                return None
+            return {'real': value.real, 'imag': value.imag}
+        if isinstance(value, dict):
+            return {key: walk(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return tuple(walk(item) for item in value)
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        # NumPy scalars / 0-d arrays often expose ``.item()``.
+        item = getattr(value, 'item', None)
+        shape = getattr(value, 'shape', None)
+        if callable(item) and shape == ():
+            try:
+                return walk(item())
+            except Exception:  # noqa: BLE001 — leave non-JSON types to dumps default
+                return value
+        tolist = getattr(value, 'tolist', None)
+        if callable(tolist) and type(value).__name__ == 'ndarray':
+            return walk(tolist())
+        return value
+
+    return walk(obj), found
 
 
 def canonical_json_bytes(payload: Any) -> bytes:

@@ -56,3 +56,45 @@ def test_list_gpu_m3_queue_ranks_by_q(tmp_path: Path) -> None:
     queue = list_gpu_m3_queue(tmp_path, max_candidates=10)
     assert [r['candidate_id'] for r in queue] == ['CAND-lo', 'CAND-hi']
     assert queue[0]['q_upper'] == 0.81
+
+
+def test_list_gpu_m3_queue_excludes_error_and_nonfinite(tmp_path: Path) -> None:
+    _pkg(tmp_path, 'M7-B', 'CAND-fresh', q=0.90)
+    err = _pkg(tmp_path, 'M7-B', 'CAND-err', q=0.50)
+    nf = _pkg(tmp_path, 'M7-B', 'CAND-nf', q=0.40)
+    resume = _pkg(tmp_path, 'M7-B', 'CAND-resume', q=0.70)
+    atomic_write_json(err / 'GPU_M3.json', {
+        'status': 'M3_ERROR',
+        'error': 'ValueError: Out of range float values are not JSON compliant',
+        'consecutive_failures': 1,
+        'certification_status': CERTIFICATION_STATUS,
+        'claim_scope': CLAIM_SCOPE,
+    })
+    atomic_write_json(nf / 'GPU_M3.json', {
+        'status': 'M3_BLOCKED_NONFINITE',
+        'nonfinite_values_present': True,
+        'consecutive_failures': 1,
+        'certification_status': CERTIFICATION_STATUS,
+        'claim_scope': CLAIM_SCOPE,
+    })
+    atomic_write_json(resume / 'GPU_M3.json', {
+        'status': 'M3_CHECKPOINT',
+        'consecutive_failures': 0,
+        'certification_status': CERTIFICATION_STATUS,
+        'claim_scope': CLAIM_SCOPE,
+    })
+
+    queue = list_gpu_m3_queue(tmp_path, max_candidates=20)
+    ids = [r['candidate_id'] for r in queue]
+    assert 'CAND-err' not in ids
+    assert 'CAND-nf' not in ids
+    assert ids[0] == 'CAND-resume'
+    assert 'CAND-fresh' in ids
+
+    with_err = list_gpu_m3_queue(
+        tmp_path, max_candidates=20, include_errors=True,
+    )
+    with_ids = [r['candidate_id'] for r in with_err]
+    assert 'CAND-err' in with_ids
+    assert 'CAND-nf' in with_ids
+    assert with_ids.index('CAND-resume') < with_ids.index('CAND-err')

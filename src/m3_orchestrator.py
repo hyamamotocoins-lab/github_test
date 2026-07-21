@@ -16,7 +16,7 @@ import torch
 from .checkpoint import CheckpointManager, CheckpointSaveResult, RunState
 from .common import (
     atomic_write_json, canonical_json_bytes, fsync_directory, hash_tree, read_json,
-    safe_component, sha256_bytes, sha256_file, utc_now,
+    safe_component, sanitize_for_json, sha256_bytes, sha256_file, utc_now,
 )
 from .contraction_backend import (
     BackendUnavailableError, ContractionBackend, backend_selection, select_backend,
@@ -359,8 +359,7 @@ class M3Orchestrator:
         temporary.mkdir(parents=False, exist_ok=False)
         try:
             result = self._compute_phase(item)
-            result_file = temporary / 'result.json'
-            atomic_write_json(result_file, {
+            payload = {
                 'schema_version': 1, 'milestone': 'M3',
                 'phase': item.phase, 'item_id': item.item_id,
                 'config_hash': self.config.config_hash(),
@@ -371,10 +370,35 @@ class M3Orchestrator:
                 ),
                 'certification_status': 'NOT_CERTIFIED',
                 'generated_at': utc_now(), 'result': result,
-            })
+            }
+            clean, had_nonfinite = sanitize_for_json(payload)
+            if had_nonfinite:
+                # Diagnostic write only — never treat sanitized floats as PASS.
+                clean['nonfinite_values_present'] = True
+                clean['certification_status'] = 'NOT_CERTIFIED'
+                if isinstance(clean.get('result'), dict):
+                    clean['result'] = {
+                        **clean['result'],
+                        'status': 'FAIL_NONFINITE',
+                        'nonfinite_values_present': True,
+                    }
+                result_file = temporary / 'result.json'
+                atomic_write_json(result_file, clean)
+                fsync_directory(temporary)
+                os.replace(temporary, final)
+                fsync_directory(parent)
+                # Keep diagnostic under final/; do not delete on this path.
+                temporary = None  # type: ignore[assignment]
+                raise ArithmeticError(
+                    f'M3 phase {item.phase} produced non-finite floats; '
+                    'fail closed (NOT_CERTIFIED / nonfinite_values_present).'
+                )
+            result_file = temporary / 'result.json'
+            atomic_write_json(result_file, clean)
             fsync_directory(temporary)
             os.replace(temporary, final)
             fsync_directory(parent)
+            temporary = None  # type: ignore[assignment]
             committed = final / 'result.json'
             relative = committed.relative_to(self.run_root).as_posix()
             digest = sha256_file(committed)
@@ -389,7 +413,7 @@ class M3Orchestrator:
                 raise RuntimeError('M3 result verification failed after commit.')
             return relative, digest
         except Exception:
-            if temporary.exists():
+            if temporary is not None and temporary.exists():
                 shutil.rmtree(temporary, ignore_errors=True)
             raise
 
@@ -426,8 +450,19 @@ class M3Orchestrator:
             'stop_reason': reason, 'elapsed_s': elapsed,
             'remaining_s': remaining, 'session_artifacts': artifacts,
         }
-        print(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False))
-        return summary
+        clean, had_nonfinite = sanitize_for_json(summary)
+        if had_nonfinite:
+            clean['nonfinite_values_present'] = True
+            clean['certification_status'] = 'NOT_CERTIFIED'
+            # Exploratory path must not look complete when metrics are nonfinite.
+            if clean.get('phase') == 'M3_COMPLETE':
+                clean['phase'] = 'M3_RUNNING'
+                clean['milestone_status'] = 'EXPLORATORY'
+                clean['stop_reason'] = (
+                    f'{reason}; nonfinite_values_present (fail closed)'
+                )
+        print(json.dumps(clean, ensure_ascii=False, indent=2, allow_nan=False))
+        return clean
 
     def run_until_checkpoint(self) -> dict[str, Any]:
         self.state.assert_m3_safe()

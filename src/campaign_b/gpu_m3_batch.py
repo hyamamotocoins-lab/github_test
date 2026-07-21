@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..common import atomic_write_json, read_json, utc_now
+from ..common import atomic_write_json, read_json, sanitize_for_json, utc_now
 from .advance_selected import discover_selected_packages, _q_upper_from_package
 from .schemas import screening_only_payload
 
@@ -34,6 +34,71 @@ DEFAULT_TEST_REPORT: dict[str, str] = {
     'm3_oom_recovery': 'PASS',
     'note': 'Batch default; set RUN_M3_TESTS=1 in notebook 74 path for full suites.',
 }
+
+# After this many consecutive session failures, push a package behind fresh READY
+# work so a handful of stuck resumes cannot monopolize max_sessions slots.
+M3_FAIL_DEPRIORITIZE_AFTER = 2
+
+
+def _consecutive_failures(package: Path) -> int:
+    doc = _load_json(Path(package) / 'GPU_M3.json')
+    if not isinstance(doc, dict):
+        return 0
+    try:
+        return max(0, int(doc.get('consecutive_failures') or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _queue_tier(
+    status: str | None,
+    fail_count: int,
+    *,
+    deprioritize_after: int = M3_FAIL_DEPRIORITIZE_AFTER,
+) -> int:
+    """Lower tier schedules sooner.
+
+    0 = healthy in-flight resume (M3_RUNNING / M3_CHECKPOINT)
+    1 = fresh READY / no GPU_M3 / other non-error
+    2 = M3_ERROR or repeated failures (deprioritized)
+    """
+    if status in {'M3_ERROR', 'M3_BLOCKED_NONFINITE'} or fail_count >= int(
+        deprioritize_after,
+    ):
+        return 2
+    if status in {'M3_RUNNING', 'M3_CHECKPOINT'}:
+        return 0
+    return 1
+
+
+def _is_nonfinite_error_message(msg: str) -> bool:
+    lower = msg.lower()
+    return (
+        'not json compliant' in lower
+        or 'non-finite' in lower
+        or 'nonfinite' in lower
+        or 'out of range float' in lower
+    )
+
+
+def _is_m3_already_complete_result(
+    result: Any,
+    phase: str | None,
+) -> bool:
+    """True when orchestrator reports M3 finished (including no-op resume)."""
+    if phase == 'M3_COMPLETE':
+        return True
+    if not isinstance(result, dict):
+        return False
+    if result.get('phase') == 'M3_COMPLETE':
+        return True
+    if result.get('nonfinite_values_present'):
+        return False
+    text = ' '.join(
+        str(result.get(key) or '')
+        for key in ('stop_reason', 'message', 'milestone_status')
+    )
+    return 'M3 already complete' in text or 'M3 complete' in text
 
 
 def _gpu_root(persistent_root: Path) -> Path:
@@ -92,6 +157,8 @@ def list_gpu_m3_queue(
     max_candidates: int | None = None,
     only_campaign_run_id: str | None = None,
     include_complete: bool = False,
+    include_errors: bool = False,
+    fail_deprioritize_after: int = M3_FAIL_DEPRIORITIZE_AFTER,
 ) -> list[dict[str, Any]]:
     packages = discover_selected_packages(persistent_root)
     if only_campaign_run_id:
@@ -100,30 +167,53 @@ def list_gpu_m3_queue(
             if only_campaign_run_id in p.parts
         ]
     rows: list[dict[str, Any]] = []
+    deprioritize_after = max(1, int(fail_deprioritize_after))
+    blocked_excluded = {'M3_COMPLETE', 'M3_BLOCKED_BAD_M2', 'M3_BLOCKED_NONFINITE'}
     for package in packages:
         if not _is_ready_for_m3(package):
             continue
         status = _gpu_status(package)
-        if status == 'M3_COMPLETE' and not include_complete:
+        if status in blocked_excluded and not include_complete:
+            # NONFINITE / BAD_M2 stay out unless explicitly re-included.
+            if status == 'M3_COMPLETE' or not include_errors:
+                continue
+        if status == 'M3_ERROR' and not include_errors:
+            # Leave durable errors out of the default resume front so fresh
+            # READY_FOR_M3 (no GPU_M3) packages get scheduled.
             continue
-        if status == 'M3_BLOCKED_BAD_M2' and not include_complete:
+        fail_count = _consecutive_failures(package)
+        if (
+            not include_errors
+            and fail_count >= deprioritize_after
+            and status in {'M3_RUNNING', 'M3_CHECKPOINT', 'M3_ERROR', None}
+        ):
+            # Repeated identical resume failures: drop from default queue.
+            # Operators can pass include_errors=True to retry.
             continue
-        if status == 'M3_RUNNING':
-            # Prefer resume of in-flight runs.
+        tier = _queue_tier(
+            status, fail_count, deprioritize_after=deprioritize_after,
+        )
+        if status == 'M3_RUNNING' and tier == 0:
+            # Prefer resume of healthy in-flight runs.
             priority = -1.0
         else:
             priority = _q_upper_from_package(package)
+        q_upper = None if priority < 0 else (
+            None if priority == float('inf') else priority
+        )
         rows.append({
             'package': str(package),
             'candidate_id': package.name,
-            'q_upper': None if priority < 0 else (
-                None if priority == float('inf') else priority
-            ),
+            'q_upper': q_upper,
             'sort_key': priority,
             'gpu_status': status,
+            'consecutive_failures': fail_count,
+            'queue_tier': tier,
+            'deprioritized': tier >= 2,
         })
+    # tier 0 resume → tier 1 fresh READY → tier 2 repeated failures / errors
     rows.sort(key=lambda r: (
-        0 if r['gpu_status'] in {'M3_RUNNING', 'M3_CHECKPOINT'} else 1,
+        int(r['queue_tier']),
         float('inf') if r['sort_key'] is None else float(r['sort_key']),
         r['package'],
     ))
@@ -480,6 +570,7 @@ def run_one_gpu_m3(
     config = build_m3_config(package, project_root=project_root)
     report = test_report or DEFAULT_TEST_REPORT
     keep_latest_actions: list[dict[str, Any]] = []
+    prev_fail = _consecutive_failures(package)
     if auto_keep_latest_m3_checkpoint:
         # Trim before resume so prior mid-flight ckpt piles do not grow further.
         keep_latest_actions.append(
@@ -492,6 +583,7 @@ def run_one_gpu_m3(
         'm2_run_id': prepared['m2_run_id'],
         'm3_run_id': m3_run_id,
         'phase': 'starting',
+        'consecutive_failures': prev_fail,
     })
     os.environ.setdefault('VALIDATED_RG_M3_ALLOW_CODE_DRIFT', '1')
     orch = create_or_resume_m3(
@@ -503,9 +595,35 @@ def run_one_gpu_m3(
         allow_code_drift=True,
     )
     result = orch.run_until_checkpoint()
-    phase = getattr(orch.state, 'phase', None) or result.get('phase')
-    complete = phase == 'M3_COMPLETE' or (
-        isinstance(result, dict) and 'M3 complete' in str(result.get('message') or '')
+    clean_result, had_nonfinite = sanitize_for_json(result)
+    if isinstance(result, dict) and result.get('nonfinite_values_present'):
+        had_nonfinite = True
+    phase = getattr(orch.state, 'phase', None) or (
+        clean_result.get('phase') if isinstance(clean_result, dict) else None
+    )
+    if had_nonfinite:
+        out = {
+            'status': 'M3_BLOCKED_NONFINITE',
+            'm2_run_id': prepared['m2_run_id'],
+            'm3_run_id': m3_run_id,
+            'phase': phase,
+            'run_root': str(orch.run_root),
+            'result': clean_result if isinstance(clean_result, dict) else {'raw': clean_result},
+            'nonfinite_values_present': True,
+            'consecutive_failures': prev_fail + 1,
+            'error': (
+                'Non-finite floats in M3 session result; fail closed '
+                '(NOT_CERTIFIED / M3_BLOCKED_NONFINITE).'
+            ),
+            'keep_latest': keep_latest_actions,
+            'm3_recipe_written': False,
+            **screening_only_payload(),
+        }
+        _write_gpu_status(package, out)
+        raise GpuM3BatchError(out['error'])
+    complete = _is_m3_already_complete_result(
+        clean_result if isinstance(clean_result, dict) else result,
+        str(phase) if phase is not None else None,
     )
     status = 'M3_COMPLETE' if complete else 'M3_CHECKPOINT'
     recipe: dict[str, Any] | None = None
@@ -530,9 +648,11 @@ def run_one_gpu_m3(
         'm3_run_id': m3_run_id,
         'phase': phase,
         'run_root': str(orch.run_root),
-        'result': result,
+        'result': clean_result,
         'keep_latest': keep_latest_actions,
         'm3_recipe_written': recipe is not None,
+        'consecutive_failures': 0,
+        'nonfinite_values_present': False,
         **screening_only_payload(),
     }
     _write_gpu_status(package, out)
@@ -548,6 +668,7 @@ def run_gpu_m3_batch(
     only_campaign_run_id: str | None = None,
     test_report: dict[str, Any] | None = None,
     auto_keep_latest_m3_checkpoint: bool = True,
+    include_errors: bool = False,
 ) -> dict[str, Any]:
     """Run up to max_sessions sequential GPU M3 sessions (resume-friendly)."""
     persistent_root = Path(persistent_root)
@@ -556,6 +677,7 @@ def run_gpu_m3_batch(
         persistent_root,
         max_candidates=max_queue,
         only_campaign_run_id=only_campaign_run_id,
+        include_errors=include_errors,
     )
     session_results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -593,21 +715,51 @@ def run_gpu_m3_batch(
                 or 'exact equivalence result changed' in msg
                 or 'cannot read j2_max' in msg
             )
+            nonfinite = _is_nonfinite_error_message(msg)
+            prev = _load_json(package / 'GPU_M3.json') or {}
+            try:
+                prev_fail = max(0, int(prev.get('consecutive_failures') or 0))
+            except (TypeError, ValueError):
+                prev_fail = 0
+            prev_status = str(prev.get('status') or '')
+            # run_one_gpu_m3 may already have written a durable error status.
+            if prev_status in {
+                'M3_BLOCKED_NONFINITE', 'M3_ERROR', 'M3_BLOCKED_BAD_M2',
+            }:
+                status = prev_status
+                fail_count = prev_fail
+                nonfinite = bool(prev.get('nonfinite_values_present')) or nonfinite
+            else:
+                fail_count = prev_fail + 1
+                if blocked:
+                    status = 'M3_BLOCKED_BAD_M2'
+                elif nonfinite:
+                    status = 'M3_BLOCKED_NONFINITE'
+                else:
+                    status = 'M3_ERROR'
             err = {
                 'package': str(package),
                 'candidate_id': row.get('candidate_id'),
                 'error': msg,
+                'status': status,
+                'consecutive_failures': fail_count,
+                'nonfinite_values_present': nonfinite,
                 **screening_only_payload(),
             }
             errors.append(err)
             _write_gpu_status(package, {
-                'status': 'M3_BLOCKED_BAD_M2' if blocked else 'M3_ERROR',
+                'status': status,
                 'error': err['error'],
+                'consecutive_failures': fail_count,
+                'nonfinite_values_present': nonfinite,
+                'm2_run_id': prev.get('m2_run_id'),
+                'm3_run_id': prev.get('m3_run_id'),
+                'deprioritized': True,
             })
 
     from .m3_reclaim import fmt_bytes
 
-    summary = {
+    summary_raw = {
         'schema_version': 1,
         'session_id': f"GPU-M3-{utc_now().replace(':', '').replace('-', '')[:15]}Z",
         'started_at': started,
@@ -619,6 +771,7 @@ def run_gpu_m3_batch(
         'm3_complete': sum(1 for r in session_results if r.get('status') == 'M3_COMPLETE'),
         'm3_checkpoint': sum(1 for r in session_results if r.get('status') == 'M3_CHECKPOINT'),
         'auto_keep_latest_m3_checkpoint': bool(auto_keep_latest_m3_checkpoint),
+        'include_errors': bool(include_errors),
         'keep_latest_bytes_freed': keep_latest_bytes,
         'keep_latest_bytes_freed_human': fmt_bytes(keep_latest_bytes),
         'best_queued_q': next(
@@ -634,10 +787,15 @@ def run_gpu_m3_batch(
                 if auto_keep_latest_m3_checkpoint
                 else 'Auto keep-latest OFF. '
             )
-            + 'Re-run notebook 91 to resume incomplete M3 sessions.'
+            + 'Re-run notebook 91 to resume incomplete M3 sessions. '
+            'M3_ERROR / M3_BLOCKED_NONFINITE are excluded from the default queue.'
         ),
         **screening_only_payload(),
     }
+    summary, summary_nf = sanitize_for_json(summary_raw)
+    if summary_nf:
+        summary['nonfinite_values_present'] = True
+        summary['certification_status'] = 'NOT_CERTIFIED'
     root = _gpu_root(persistent_root)
     root.mkdir(parents=True, exist_ok=True)
     atomic_write_json(root / 'LATEST_GPU_M3_SESSION.json', summary)
@@ -661,6 +819,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--max-queue', type=int, default=50)
     parser.add_argument('--campaign-run-id', default=None)
     parser.add_argument('--list-only', action='store_true')
+    parser.add_argument(
+        '--include-errors',
+        action='store_true',
+        help='Include M3_ERROR / M3_BLOCKED_NONFINITE packages for retry.',
+    )
     args = parser.parse_args(argv)
     persist = Path(args.persistent_root)
     if args.list_only:
@@ -668,6 +831,7 @@ def main(argv: list[str] | None = None) -> int:
             persist,
             max_candidates=args.max_queue,
             only_campaign_run_id=args.campaign_run_id,
+            include_errors=args.include_errors,
         )
         print(json.dumps({'queue_size': len(queue), 'top': queue[:20]}, indent=2))
         return 0
@@ -677,6 +841,7 @@ def main(argv: list[str] | None = None) -> int:
         max_sessions=args.max_sessions,
         max_queue=args.max_queue,
         only_campaign_run_id=args.campaign_run_id,
+        include_errors=args.include_errors,
     )
     print(json.dumps({
         'session_id': summary.get('session_id'),

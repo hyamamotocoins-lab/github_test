@@ -4,7 +4,10 @@ from pathlib import Path
 from typing import Any
 
 from .checkpoint import CheckpointSaveResult, RunState
-from .common import atomic_write_json, atomic_write_text, read_json, sha256_file, utc_now
+from .common import (
+    atomic_write_json, atomic_write_text, read_json, sanitize_for_json,
+    sha256_file, utc_now,
+)
 from .m3_config import M3Config
 from .reporting import peak_memory_report
 from .work_queue import WorkQueue
@@ -273,7 +276,7 @@ def write_m3_session_artifacts(
     summary_path = report_dir / 'session_summary.json'
     metrics_path = report_dir / 'latest_metrics.json'
     plan_path = report_dir / 'next_session_plan.md'
-    atomic_write_json(summary_path, {
+    summary_payload, summary_nf = sanitize_for_json({
         'milestone': 'M3', 'run_id': state.run_id, 'phase': state.phase,
         'milestone_status': (
             'CORE_REPRODUCED' if state.phase == 'M3_COMPLETE' else 'EXPLORATORY'
@@ -282,11 +285,19 @@ def write_m3_session_artifacts(
         'elapsed_s': elapsed_s, 'remaining_s': remaining_s,
         'queue': counts, 'generated_at': utc_now(),
     })
-    atomic_write_json(metrics_path, {
+    if summary_nf:
+        summary_payload['nonfinite_values_present'] = True
+        summary_payload['certification_status'] = 'NOT_CERTIFIED'
+    atomic_write_json(summary_path, summary_payload)
+    metrics_payload, metrics_nf = sanitize_for_json({
         'milestone': 'M3', 'run_id': state.run_id,
         'memory': peak_memory_report(), 'certification_status': 'NOT_CERTIFIED',
         'generated_at': utc_now(),
     })
+    if metrics_nf:
+        metrics_payload['nonfinite_values_present'] = True
+        metrics_payload['certification_status'] = 'NOT_CERTIFIED'
+    atomic_write_json(metrics_path, metrics_payload)
     if state.phase == 'M3_COMPLETE':
         plan = (
             '# Next session plan\n\nM3 is CORE_REPRODUCED. Review '

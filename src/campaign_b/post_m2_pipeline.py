@@ -193,6 +193,7 @@ def run_post_m2_pipeline(
             'rounds_run': inner.get('rounds_run'),
             'stop_reason': stop_reason,
             'remaining_runnable': remaining,
+            'stuck_diagnostics': inner.get('stuck_diagnostics'),
             'totals': inner.get('totals'),
             'auto_strip_m3_checkpoints': inner.get('auto_strip_m3_checkpoints'),
             'auto_keep_latest_m3_checkpoint': inner.get(
@@ -307,6 +308,11 @@ def run_post_m2_pipeline(
         'remaining_runnable': (
             inner.get('remaining_runnable')
             if isinstance(inner.get('remaining_runnable'), dict)
+            else None
+        ),
+        'stuck_diagnostics': (
+            inner.get('stuck_diagnostics')
+            if isinstance(inner.get('stuck_diagnostics'), dict)
             else None
         ),
         'm3_reclaim': (

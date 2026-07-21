@@ -332,6 +332,28 @@ def run_pipeline_to_m6(
     reclaim_totals['keep_latest_bytes_freed_human'] = fmt_bytes(
         int(reclaim_totals['keep_latest_bytes_freed']),
     )
+    stuck_diagnostics: dict[str, Any] | None = None
+    if stop_reason == 'STUCK_BACKLOG' and rounds:
+        last = rounds[-1]
+        stages = last.get('stages') or {}
+        m3 = stages.get('m3') or {}
+        pre = stages.get('pre_m6') or {}
+        obl = stages.get('obligations') or {}
+        stuck_diagnostics = {
+            'round': last.get('round'),
+            'remaining_runnable': dict(last_remaining),
+            'sessions_error': m3.get('sessions_error'),
+            'sessions_attempted': m3.get('sessions_attempted'),
+            'sessions_ok': m3.get('sessions_ok'),
+            'm3_errors': (m3.get('errors') or [])[:20],
+            'pre_m6_errors': (pre.get('errors') or [])[:10],
+            'obligation_errors': (obl.get('errors') or [])[:10],
+            'hint': (
+                'Inspect campaign_b/_gpu_m3/LATEST_GPU_M3_SESSION.json. '
+                'JSON/NaN failures become M3_BLOCKED_NONFINITE and leave the '
+                'default queue so fresh READY_FOR_M3 can schedule.'
+            ),
+        }
     summary = {
         'schema_version': 1,
         'session_id': f"PIPE-{utc_now().replace(':', '').replace('-', '')[:15]}Z",
@@ -342,6 +364,7 @@ def run_pipeline_to_m6(
         'max_idle_rounds': max_idle,
         'stop_reason': stop_reason,
         'remaining_runnable': dict(last_remaining),
+        'stuck_diagnostics': stuck_diagnostics,
         'only_campaign_run_id': only_campaign_run_id,
         'auto_strip_m3_checkpoints': bool(auto_strip_m3_checkpoints),
         'auto_keep_latest_m3_checkpoint': bool(auto_keep_latest_m3_checkpoint),

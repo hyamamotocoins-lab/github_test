@@ -169,6 +169,13 @@ def test_pipeline_multi_round_then_idle(tmp_path: Path) -> None:
 def test_pipeline_retries_failed_attempts_then_stuck(tmp_path: Path) -> None:
     """progress==0 with runnable + attempts continues until max_idle_rounds."""
     failed = _stage(sessions_attempted=2, sessions_error=2)
+    failed['errors'] = [
+        {
+            'package': '/fake/pkg',
+            'error': 'ValueError: Out of range float values are not JSON compliant',
+            'status': 'M3_BLOCKED_NONFINITE',
+        },
+    ]
     empty = _stage()
     with (
         patch('src.campaign_b.advance_selected.run_advance_selected', return_value=empty),
@@ -198,6 +205,10 @@ def test_pipeline_retries_failed_attempts_then_stuck(tmp_path: Path) -> None:
     assert summary['rounds_run'] == 2
     assert summary['stop_reason'] == 'STUCK_BACKLOG'
     assert summary['remaining_runnable']['gpu_m3'] == 1
+    diag = summary.get('stuck_diagnostics')
+    assert isinstance(diag, dict)
+    assert diag.get('sessions_error') == 2
+    assert diag['m3_errors'][0]['error'].startswith('ValueError:')
 
 
 def test_pipeline_no_attempts_with_backlog(tmp_path: Path) -> None:
