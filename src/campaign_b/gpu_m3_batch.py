@@ -564,6 +564,15 @@ def run_gpu_m3_batch(
     for index, row in enumerate(queue):
         if index >= int(max_sessions):
             break
+        if index > 0:
+            # Best-effort: keep lease heartbeat fresh between long sessions
+            # so a Paperspace host switch does not steal a live job at 15m.
+            try:
+                from .execution_keys import refresh_gpu_lane_heartbeat
+
+                refresh_gpu_lane_heartbeat(persistent_root)
+            except Exception:  # noqa: BLE001 — best-effort only
+                pass
         package = Path(row['package'])
         try:
             result = run_one_gpu_m3(

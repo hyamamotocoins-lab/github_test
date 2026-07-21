@@ -5,6 +5,15 @@ File: ``{PERSIST}/campaign_b/_locks/gpu_lane.json``
 Acquire fails closed when another live process holds a fresh lease. Stale leases
 (dead PID or expired heartbeat) are reclaimed on start. Same-process nested
 acquire (e.g. 97 → pipeline_to_m6) refreshes the heartbeat and increments depth.
+
+Foreign-host leases (Paperspace machine switch) cannot probe the remote PID.
+They use a shorter stale threshold (default 15 min via
+``FOREIGN_HOST_STALE_HEARTBEAT_SEC`` / env ``VALIDATED_RG_GPU_LANE_FOREIGN_STALE_SEC``)
+so a dead lock from a previous hostname is reclaimable without a manual ``rm``.
+
+Live multi-machine GPU consumers must call ``refresh_gpu_lane_heartbeat`` during
+long work; 15 minutes without refresh ⇒ reclaimable after host change or crash.
+Same-host dead PID remains immediately reclaimable.
 """
 
 from __future__ import annotations
@@ -23,23 +32,32 @@ from .schemas import screening_only_payload
 
 __all__ = [
     'DEFAULT_STALE_HEARTBEAT_SEC',
+    'FOREIGN_HOST_STALE_HEARTBEAT_SEC',
     'ExecutionKey',
     'GPU_LOCK_NAME',
     'GpuLaneHeldError',
     'M3_EXECUTION_KEY',
     'acquire_gpu_lock',
+    'force_release_gpu_lane_lease',
+    'foreign_stale_heartbeat_sec',
     'gpu_lane_lease',
     'gpu_lane_path',
     'gpu_lock_path',
     'm3_execution_key',
     'read_gpu_lane_lease',
+    'refresh_gpu_lane_heartbeat',
     'release_gpu_lock',
+    'try_reclaim_gpu_lane_lease',
 ]
 
 GPU_LOCK_NAME = 'gpu_lane'
 M3_EXECUTION_KEY = 'shared_m3_batch'
-# Match the six-hour GPU session budget; dead-PID reclaim is the primary path.
+# Match the six-hour GPU session budget; dead-PID reclaim is the primary path
+# for same-host crashes.
 DEFAULT_STALE_HEARTBEAT_SEC = 6 * 3600
+# Paperspace host change: cannot probe remote PID; reclaim after short silence.
+FOREIGN_HOST_STALE_HEARTBEAT_SEC = 15 * 60
+_FOREIGN_STALE_ENV = 'VALIDATED_RG_GPU_LANE_FOREIGN_STALE_SEC'
 
 # Nested hold depth per resolved persistent_root (same process only).
 _hold_depth: dict[str, int] = {}
@@ -51,6 +69,18 @@ class ExecutionKey:
 
     name: str
     owner: str = 'campaign_b'
+
+
+def foreign_stale_heartbeat_sec(
+    explicit: int | None = None,
+) -> int:
+    """Resolve foreign-host stale threshold (arg > env > default 15 min)."""
+    if explicit is not None:
+        return int(explicit)
+    raw = os.environ.get(_FOREIGN_STALE_ENV)
+    if raw is not None and str(raw).strip():
+        return int(raw)
+    return FOREIGN_HOST_STALE_HEARTBEAT_SEC
 
 
 def gpu_lane_path(persistent_root: Path) -> Path:
@@ -97,6 +127,7 @@ def _lease_stale_reason(
     doc: dict[str, Any],
     *,
     stale_heartbeat_sec: int,
+    foreign_stale_sec: int,
     now: datetime,
 ) -> str | None:
     """Return a reclaim reason, or None if the lease is still held."""
@@ -112,12 +143,12 @@ def _lease_stale_reason(
         return f'dead_pid:{pid}'
 
     if host and host != local_host:
-        # Different machine: only reclaim on heartbeat expiry (cannot probe PID).
+        # Different machine: only reclaim on (shorter) heartbeat expiry.
         heartbeat = _parse_iso(doc.get('heartbeat_at') or doc.get('acquired_at'))
         if heartbeat is None:
             return 'missing_heartbeat_foreign_host'
         age = (now - heartbeat).total_seconds()
-        if age > float(stale_heartbeat_sec):
+        if age > float(foreign_stale_sec):
             return f'stale_heartbeat_foreign_host:{int(age)}s'
         return None
 
@@ -155,7 +186,9 @@ def _write_lease(
         'enforced': True,
         'note': (
             'Exclusive GPU lane lease. Fail closed if held by another live process. '
-            'Stale (dead pid / old heartbeat) may be reclaimed on acquire.'
+            'Same-host dead pid reclaims immediately; foreign-host reclaim uses the '
+            'shorter FOREIGN_HOST_STALE_HEARTBEAT_SEC threshold. Live holders must '
+            'refresh heartbeats during long work.'
         ),
         **screening_only_payload(),
     }
@@ -175,15 +208,44 @@ def read_gpu_lane_lease(persistent_root: Path) -> dict[str, Any] | None:
     return doc if isinstance(doc, dict) else None
 
 
+def refresh_gpu_lane_heartbeat(persistent_root: Path) -> dict[str, Any] | None:
+    """Update ``heartbeat_at`` if this process holds the lease.
+
+    Preserves owner / pid / hostname / depth / acquired_at. Returns the updated
+    lease dict, or None if this process does not hold the lease (best-effort).
+    """
+    persistent_root = Path(persistent_root)
+    path = gpu_lane_path(persistent_root)
+    if not path.is_file():
+        return None
+    doc = read_gpu_lane_lease(persistent_root)
+    if not isinstance(doc, dict):
+        return None
+    same_process = (
+        int(doc.get('pid') or 0) == os.getpid()
+        and str(doc.get('hostname') or '') == socket.gethostname()
+    )
+    if not same_process:
+        return None
+    now = utc_now()
+    updated = dict(doc)
+    updated['heartbeat_at'] = now
+    atomic_write_json(path, updated)
+    return updated
+
+
 def acquire_gpu_lock(
     persistent_root: Path,
     *,
     owner: str = 'campaign_b',
     stale_heartbeat_sec: int = DEFAULT_STALE_HEARTBEAT_SEC,
+    foreign_stale_sec: int | None = None,
 ) -> dict[str, Any]:
     """Acquire exclusive GPU lane lease or fail closed.
 
     Same-process nested calls increment depth and refresh heartbeat.
+    Foreign-host stale threshold defaults to 15 min (see
+    ``foreign_stale_heartbeat_sec``).
     """
     persistent_root = Path(persistent_root)
     key = _root_key(persistent_root)
@@ -191,6 +253,7 @@ def acquire_gpu_lock(
     pid = os.getpid()
     hostname = socket.gethostname()
     now = datetime.now(timezone.utc)
+    foreign_sec = foreign_stale_heartbeat_sec(foreign_stale_sec)
 
     depth = _hold_depth.get(key, 0)
     if depth > 0:
@@ -226,6 +289,7 @@ def acquire_gpu_lock(
         stale_reason = _lease_stale_reason(
             doc,
             stale_heartbeat_sec=int(stale_heartbeat_sec),
+            foreign_stale_sec=int(foreign_sec),
             now=now,
         )
         if stale_reason is None:
@@ -236,7 +300,8 @@ def acquire_gpu_lock(
                 f"heartbeat_at={doc.get('heartbeat_at')!r} "
                 f'path={path}. '
                 'Do not run notebook 96 and 97 (or two GPU consumers) together. '
-                'Wait for the holder to finish, or reclaim only after the process is dead.'
+                'Wait for the holder to finish, or reclaim only after the process is dead '
+                f'(foreign host: after {foreign_sec}s without heartbeat).'
             )
         reclaimed_from = (
             f"owner={doc.get('owner')} pid={doc.get('pid')} "
@@ -304,18 +369,100 @@ def release_gpu_lock(
     return True
 
 
+def try_reclaim_gpu_lane_lease(
+    persistent_root: Path,
+    *,
+    stale_heartbeat_sec: int = DEFAULT_STALE_HEARTBEAT_SEC,
+    foreign_stale_sec: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Reclaim GPU lane lease using the same stale rules as acquire.
+
+    Without ``force``, deletes only when same-host dead PID or
+    foreign/same-host stale heartbeat. With ``force``, deletes even if the
+    lease looks live.
+
+    Returns a result dict with ``action``, ``path``, and optional ``reason``.
+    """
+    persistent_root = Path(persistent_root)
+    path = gpu_lane_path(persistent_root)
+    key = _root_key(persistent_root)
+    if not path.is_file():
+        return {
+            'action': 'noop',
+            'path': str(path),
+            'reason': 'no_lease_file',
+        }
+
+    doc = read_gpu_lane_lease(persistent_root) or {}
+    now = datetime.now(timezone.utc)
+    foreign_sec = foreign_stale_heartbeat_sec(foreign_stale_sec)
+    stale_reason = _lease_stale_reason(
+        doc,
+        stale_heartbeat_sec=int(stale_heartbeat_sec),
+        foreign_stale_sec=int(foreign_sec),
+        now=now,
+    )
+
+    if stale_reason is None and not force:
+        return {
+            'action': 'refused',
+            'path': str(path),
+            'reason': 'lease_looks_live',
+            'lease': {
+                'owner': doc.get('owner'),
+                'pid': doc.get('pid'),
+                'hostname': doc.get('hostname'),
+                'heartbeat_at': doc.get('heartbeat_at'),
+            },
+            'hint': (
+                'Pass --force to delete a lease that still looks live '
+                '(only if you are sure no GPU consumer is running).'
+            ),
+        }
+
+    reason = stale_reason if stale_reason is not None else 'force'
+    try:
+        path.unlink()
+    except OSError as exc:
+        return {
+            'action': 'error',
+            'path': str(path),
+            'reason': f'unlink_failed:{exc}',
+        }
+    _hold_depth.pop(key, None)
+    return {
+        'action': 'reclaimed',
+        'path': str(path),
+        'reason': reason,
+        'previous': {
+            'owner': doc.get('owner'),
+            'pid': doc.get('pid'),
+            'hostname': doc.get('hostname'),
+            'heartbeat_at': doc.get('heartbeat_at'),
+        },
+    }
+
+
+def force_release_gpu_lane_lease(persistent_root: Path) -> dict[str, Any]:
+    """Delete the GPU lane lease file even if it looks live."""
+    return try_reclaim_gpu_lane_lease(persistent_root, force=True)
+
+
 @contextmanager
 def gpu_lane_lease(
     persistent_root: Path,
     *,
     owner: str = 'campaign_b',
     stale_heartbeat_sec: int = DEFAULT_STALE_HEARTBEAT_SEC,
+    foreign_stale_sec: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Context manager around ``acquire_gpu_lock`` / ``release_gpu_lock``."""
     payload = acquire_gpu_lock(
         persistent_root,
         owner=owner,
         stale_heartbeat_sec=stale_heartbeat_sec,
+        foreign_stale_sec=foreign_stale_sec,
     )
     try:
         yield payload

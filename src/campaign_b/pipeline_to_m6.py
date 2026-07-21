@@ -121,7 +121,7 @@ def run_pipeline_to_m6(
     """
     from .advance_selected import run_advance_selected
     from .close_obligations import run_close_obligations_batch
-    from .execution_keys import gpu_lane_lease
+    from .execution_keys import gpu_lane_lease, refresh_gpu_lane_heartbeat
     from .gpu_m3_batch import run_gpu_m3_batch
     from .m3_reclaim import auto_strip_after_pipeline_round, fmt_bytes
     from .m6_batch import run_m6_batch
@@ -164,6 +164,8 @@ def run_pipeline_to_m6(
                 reclaim_totals['rounds_with_reclaim'] += 1
 
         for round_index in range(1, int(max_rounds) + 1):
+            # Keep foreign-host stale threshold from reclaiming a live job.
+            refresh_gpu_lane_heartbeat(persistent_root)
             round_doc: dict[str, Any] = {
                 'round': round_index,
                 'started_at': utc_now(),

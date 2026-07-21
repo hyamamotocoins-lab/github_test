@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import socket
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,12 +12,16 @@ import pytest
 
 from src.campaign_b.errors import GpuLaneHeldError
 from src.campaign_b.execution_keys import (
+    FOREIGN_HOST_STALE_HEARTBEAT_SEC,
     _hold_depth,
     acquire_gpu_lock,
+    foreign_stale_heartbeat_sec,
     gpu_lane_lease,
     gpu_lane_path,
     read_gpu_lane_lease,
+    refresh_gpu_lane_heartbeat,
     release_gpu_lock,
+    try_reclaim_gpu_lane_lease,
 )
 from src.common import atomic_write_json
 
@@ -123,3 +128,125 @@ def test_reclaim_stale_heartbeat(tmp_path: Path) -> None:
     assert lease['owner'] == 'fresh'
     assert 'stale_heartbeat' in str(lease.get('reclaimed_from'))
     release_gpu_lock(tmp_path, owner='fresh')
+
+
+def test_foreign_host_stale_after_15m_reclaimable(tmp_path: Path) -> None:
+    """Foreign host + heartbeat older than 15m → reclaimable (Paperspace switch)."""
+    _clear_depth(tmp_path)
+    path = gpu_lane_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    old = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=FOREIGN_HOST_STALE_HEARTBEAT_SEC + 60)
+    ).isoformat()
+    atomic_write_json(path, {
+        'schema_version': 1,
+        'key': 'gpu_lane',
+        'owner': 'old_machine',
+        'pid': 13712,
+        'hostname': 'n6plw4cgyr',
+        'acquired_at': old,
+        'heartbeat_at': old,
+        'depth': 1,
+        'enforced': True,
+    })
+    lease = acquire_gpu_lock(tmp_path, owner='new_machine')
+    assert lease['owner'] == 'new_machine'
+    assert 'stale_heartbeat_foreign_host' in str(lease.get('reclaimed_from'))
+    release_gpu_lock(tmp_path, owner='new_machine')
+
+
+def test_foreign_host_fresh_heartbeat_not_stale(tmp_path: Path) -> None:
+    """Foreign host + fresh heartbeat → not reclaimable (fail closed)."""
+    _clear_depth(tmp_path)
+    path = gpu_lane_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    # Age well under 15m but would be stale under a tiny same-host threshold.
+    fresh = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    atomic_write_json(path, {
+        'schema_version': 1,
+        'key': 'gpu_lane',
+        'owner': 'other_host',
+        'pid': 99,
+        'hostname': 'nvgqew8q38-other',
+        'acquired_at': fresh,
+        'heartbeat_at': fresh,
+        'depth': 1,
+        'enforced': True,
+    })
+    with pytest.raises(GpuLaneHeldError):
+        acquire_gpu_lock(
+            tmp_path,
+            owner='me',
+            stale_heartbeat_sec=1,  # must not affect foreign-host path
+        )
+    assert path.is_file()
+    refused = try_reclaim_gpu_lane_lease(tmp_path)
+    assert refused['action'] == 'refused'
+
+
+def test_same_host_dead_pid_reclaimable(tmp_path: Path) -> None:
+    _clear_depth(tmp_path)
+    path = gpu_lane_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    now = datetime.now(timezone.utc).isoformat()
+    atomic_write_json(path, {
+        'schema_version': 1,
+        'key': 'gpu_lane',
+        'owner': 'dead',
+        'pid': 2_147_483_647,
+        'hostname': socket.gethostname(),
+        'acquired_at': now,
+        'heartbeat_at': now,
+        'depth': 1,
+        'enforced': True,
+    })
+    result = try_reclaim_gpu_lane_lease(tmp_path)
+    assert result['action'] == 'reclaimed'
+    assert 'dead_pid' in str(result.get('reason'))
+    assert not path.is_file()
+
+
+def test_refresh_updates_heartbeat_only(tmp_path: Path) -> None:
+    _clear_depth(tmp_path)
+    lease = acquire_gpu_lock(tmp_path, owner='holder')
+    acquired = lease['acquired_at']
+    old_hb = lease['heartbeat_at']
+    depth = lease['depth']
+    time.sleep(0.02)
+    updated = refresh_gpu_lane_heartbeat(tmp_path)
+    assert updated is not None
+    assert updated['heartbeat_at'] != old_hb
+    assert updated['acquired_at'] == acquired
+    assert updated['owner'] == 'holder'
+    assert updated['pid'] == os.getpid()
+    assert updated['hostname'] == socket.gethostname()
+    assert int(updated['depth']) == int(depth)
+    release_gpu_lock(tmp_path, owner='holder')
+
+
+def test_refresh_noop_when_not_holder(tmp_path: Path) -> None:
+    _clear_depth(tmp_path)
+    path = gpu_lane_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    now = datetime.now(timezone.utc).isoformat()
+    atomic_write_json(path, {
+        'schema_version': 1,
+        'key': 'gpu_lane',
+        'owner': 'other',
+        'pid': 1,
+        'hostname': 'foreign-host',
+        'acquired_at': now,
+        'heartbeat_at': now,
+        'depth': 1,
+        'enforced': True,
+    })
+    assert refresh_gpu_lane_heartbeat(tmp_path) is None
+
+
+def test_foreign_stale_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('VALIDATED_RG_GPU_LANE_FOREIGN_STALE_SEC', '120')
+    assert foreign_stale_heartbeat_sec() == 120
+    assert foreign_stale_heartbeat_sec(30) == 30
+    monkeypatch.delenv('VALIDATED_RG_GPU_LANE_FOREIGN_STALE_SEC', raising=False)
+    assert foreign_stale_heartbeat_sec() == FOREIGN_HOST_STALE_HEARTBEAT_SEC
