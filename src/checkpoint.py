@@ -232,6 +232,12 @@ class TensorShardStore:
     def save(self, root: Path, tensors: dict[str, Any]) -> dict[str, Any]:
         root.mkdir(parents=True, exist_ok=False)
         index: dict[str, Any] = {}
+        # Identical shard payloads (e.g. triad_left == rsvd_left) share one
+        # inode via hardlink so M3/M4 keep distinct names without 2x disk use.
+        # Symlinks are forbidden by checkpoint verify; hardlinks are allowed.
+        shard_by_digest: dict[str, Path] = {}
+        bytes_written = 0
+        bytes_hardlinked = 0
         for name, value in sorted(tensors.items()):
             safe_component(name)
             is_torch = torch is not None and isinstance(value, torch.Tensor)
@@ -268,9 +274,40 @@ class TensorShardStore:
                         np.save(handle, shard, allow_pickle=False)
                         handle.flush()
                         fsync_descriptor(handle.fileno())
+                digest = sha256_file(path)
+                size = path.stat().st_size
+                prior = shard_by_digest.get(digest)
+                if prior is not None and prior != path:
+                    path.unlink()
+                    try:
+                        os.link(prior, path)
+                        bytes_hardlinked += size
+                    except OSError:
+                        # Cross-device or link-count limits: keep an independent copy.
+                        if kind == 'torch':
+                            torch.save(shard, path)
+                            fsync_file(path)
+                        else:
+                            with path.open('wb') as handle:
+                                np.save(handle, shard, allow_pickle=False)
+                                handle.flush()
+                                fsync_descriptor(handle.fileno())
+                        bytes_written += path.stat().st_size
+                        shard_by_digest[digest] = path
+                else:
+                    bytes_written += size
+                    shard_by_digest[digest] = path
                 files.append(filename)
             index[name] = {'kind': kind, 'dtype': dtype, 'shape': list(shape), 'files': files}
+        # Dedup accounting lives beside shards (not inside index.json — loaders
+        # treat every index entry as a tensor name).
         atomic_write_json(root / 'index.json', index)
+        atomic_write_json(root / 'storage_dedup.json', {
+            'schema_version': 1,
+            'bytes_written': bytes_written,
+            'bytes_hardlinked': bytes_hardlinked,
+            'unique_shard_files': len(shard_by_digest),
+        })
         return index
 
     def load(self, root: Path) -> dict[str, Any]:

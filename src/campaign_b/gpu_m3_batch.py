@@ -528,9 +528,10 @@ def write_m3_recipe_stub(
         'claim_scope': CLAIM_SCOPE,
         'written_at': utc_now(),
         'note': (
-            'Recipe stub for future regeneratability. Tensors may be stripped '
-            'after downstream M4+; do not treat this as CERTIFIED. '
-            'Tensors are NOT deleted at M3_COMPLETE (still needed for M4).'
+            'Minimal recipe/receipt for regeneratability and audit. '
+            'Identical Triad/RSVD shard payloads are hardlinked in the single '
+            'retained checkpoint. Full tensors are stripped immediately after '
+            'M4_COMPLETE (and by session reclaim). Do not treat as CERTIFIED.'
         ),
         **screening_only_payload(),
     }
@@ -589,6 +590,9 @@ def run_one_gpu_m3(
     # In-orchestrator prune after each verified ckpt (default keep=1).
     # Complements Campaign B keep-latest reclaim; do not raise min to >1 here.
     os.environ.setdefault('VALIDATED_RG_M3_CHECKPOINT_KEEP', '1')
+    # CheckpointManager enforces keep>=2 during save (fallback window); M3 prune
+    # then reduces to 1. Cap the interim pile at 2 instead of the global default 5.
+    os.environ.setdefault('VALIDATED_RG_CHECKPOINT_KEEP', '2')
     orch = create_or_resume_m3(
         Path(persistent_root),
         config,

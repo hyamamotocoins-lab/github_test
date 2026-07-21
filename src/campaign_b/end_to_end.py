@@ -48,7 +48,7 @@ class EndToEndConfig:
     skip_m6: bool = False
     # M3 storage reclaim (same defaults as notebook 97 / pipeline_to_m6).
     auto_strip_m3_checkpoints: bool = True
-    persist_m3_cap_gib: float | None = 80.0
+    persist_m3_cap_gib: float | None = 32.0
     auto_keep_latest_m3_checkpoint: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -118,7 +118,7 @@ def load_end_to_end_config(
         skip_obligations=bool(_get('skip_obligations', False)),
         skip_m6=bool(_get('skip_m6', False)),
         auto_strip_m3_checkpoints=bool(_get('auto_strip_m3_checkpoints', True)),
-        persist_m3_cap_gib=_get('persist_m3_cap_gib', 80.0),
+        persist_m3_cap_gib=_get('persist_m3_cap_gib', 32.0),
         auto_keep_latest_m3_checkpoint=bool(
             _get('auto_keep_latest_m3_checkpoint', True),
         ),
@@ -219,7 +219,7 @@ def run_end_to_end(
       all ``runs/M3-*``, plus per-M3-session trim via ``run_gpu_m3_batch``.
     - ``auto_strip_m3_checkpoints``: session-start full strip of
       COMPLETE+downstream, plus per-round incremental strip.
-    - ``persist_m3_cap_gib`` (default 80.0; None disables): size cap after strip.
+    - ``persist_m3_cap_gib`` (default 32.0; None disables): size cap after strip.
 
     See ``docs/campaign_b_m3_storage_reclaim.md``.
     """

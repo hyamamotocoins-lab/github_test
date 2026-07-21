@@ -385,6 +385,31 @@ def test_keep_latest_checkpoint(reclaim, tmp_path: Path) -> None:
     assert [p.name for p in ckpts] == ['ckpt_000003']
 
 
+def test_strip_m3_after_m4_complete_immediate(tmp_path: Path) -> None:
+    root = tmp_path / 'persist'
+    m3 = 'M3-immediate-strip'
+    m4 = 'M4-child-done'
+    _m3_complete_tree(root / 'runs' / m3, ckpt_blob=800, n_ckpts=1)
+    _m4_complete(root, m4)
+    _package(root, campaign='camp1', name='pkg', m3=m3, m4=m4)
+
+    out = lib.strip_m3_after_m4_complete(root, m3, execute=True)
+    assert out['stripped'] == 1
+    assert out['trigger'] == 'm4_complete_immediate'
+    assert (root / 'runs' / m3 / 'checkpoints' / 'STRIPPED_FOR_RECLAIM.json').is_file()
+    assert not any((root / 'runs' / m3 / 'checkpoints').glob('ckpt_*'))
+
+    again = lib.strip_m3_after_m4_complete(root, m3, execute=True)
+    assert again['stripped'] == 0
+
+    bad = lib.strip_m3_after_m4_complete(root, 'not-an-m3', execute=True)
+    assert bad['label'] == 'SKIP_BAD_M3_ID'
+
+
+def test_default_persist_m3_cap_is_aggressive() -> None:
+    assert lib.DEFAULT_PERSIST_M3_CAP_GIB == 32.0
+
+
 def test_delete_run_requires_flag_and_skips_referenced(reclaim, tmp_path: Path) -> None:
     root = tmp_path / 'persist'
     m3_ref = 'M3-ref-del'

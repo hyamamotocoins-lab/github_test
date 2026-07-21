@@ -52,7 +52,7 @@ class PostM2Config:
     # After M4+ consumes M3, strip M3 checkpoints (fail-closed criteria).
     auto_strip_m3_checkpoints: bool = True
     # Cap total runs/M3-* size (GiB); None disables. Default matches notebook 97.
-    persist_m3_cap_gib: float | None = 80.0
+    persist_m3_cap_gib: float | None = 32.0
     # During active M3: keep only latest COMMITTED ckpt (quota crisis default ON).
     auto_keep_latest_m3_checkpoint: bool = True
 
@@ -102,7 +102,7 @@ def run_post_m2_pipeline(
     drain_existing_backlog: bool = True,
     disable_session_wallclock: bool = True,
     auto_strip_m3_checkpoints: bool = True,
-    persist_m3_cap_gib: float | None = 80.0,
+    persist_m3_cap_gib: float | None = 32.0,
     auto_keep_latest_m3_checkpoint: bool = True,
 ) -> dict[str, Any]:
     """Drain M2-ready backlog (default) or run backlog-aware end-to-end.
@@ -119,7 +119,7 @@ def run_post_m2_pipeline(
     COMPLETE+downstream M3, plus per-round incremental strip. Ledger records
     stripped count / GiB. See ``docs/campaign_b_m3_storage_reclaim.md``.
 
-    ``persist_m3_cap_gib`` (default 80.0; None disables): after each strip,
+    ``persist_m3_cap_gib`` (default 32.0; None disables): after each strip,
     enforce a ``runs/M3-*`` size cap (oldest eligible first).
 
     ``auto_keep_latest_m3_checkpoint`` (default True): session-start full

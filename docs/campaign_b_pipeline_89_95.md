@@ -258,9 +258,12 @@ NaN/Inf で JSON シリアライズに失敗したセッションは fail-closed
 
 数値: FP64 必須、TF32 無効、deterministic algorithms。  
 バッチは `VALIDATED_RG_M3_ALLOW_CODE_DRIFT=1` を setdefault（source/notebook hash drift でも resume 可；config_hash と M2 parent ピンは維持）。
-あわせて `VALIDATED_RG_M3_CHECKPOINT_KEEP=1` を setdefault（検証済み ckpt 直後に
-同一 run の古い COMMITTED を prune。詳細は
-[campaign_b_m3_storage_reclaim.md](./campaign_b_m3_storage_reclaim.md) §3b）。
+あわせて `VALIDATED_RG_M3_CHECKPOINT_KEEP=1` と
+`VALIDATED_RG_CHECKPOINT_KEEP=2` を setdefault（検証済み ckpt 直後に
+同一 run の古い COMMITTED を prune；CheckpointManager の一時 keep は 2。
+Triad/RSVD 同内容 shard は hardlink。詳細は
+[campaign_b_m3_storage_reclaim.md](./campaign_b_m3_storage_reclaim.md) の
+minimal-storage contract）。
 
 `run_until_checkpoint` は「次の item を安全に始められない」「drain/final/hard return」「全フェーズ完了」のいずれかで戻る。未完了なら `GPU_M3.json` は `M3_CHECKPOINT` → 再実行で resume。
 

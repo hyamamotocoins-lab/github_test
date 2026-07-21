@@ -123,7 +123,7 @@ def test_post_m2_defaults_drain_via_pipeline_to_m6(tmp_path: Path) -> None:
     assert kwargs['max_m3_sessions'] == 16
     assert kwargs['auto_strip_m3_checkpoints'] is True
     assert kwargs['auto_keep_latest_m3_checkpoint'] is True
-    assert kwargs['persist_m3_cap_gib'] == 80.0
+    assert kwargs['persist_m3_cap_gib'] == 32.0
     assert summary['notebook'] == 97
     assert summary['mode'] == 'drain_existing_backlog'
     assert summary['drain_existing_backlog'] is True
@@ -210,7 +210,7 @@ def test_post_m2_opt_in_end_to_end_screening_path(tmp_path: Path) -> None:
     assert e2e_cfg.skip_screening is True
     assert e2e_cfg.auto_strip_m3_checkpoints is True
     assert e2e_cfg.auto_keep_latest_m3_checkpoint is True
-    assert e2e_cfg.persist_m3_cap_gib == 80.0
+    assert e2e_cfg.persist_m3_cap_gib == 32.0
     assert summary['mode'] == 'end_to_end'
     assert summary['drain_existing_backlog'] is False
     assert summary['end_to_end']['session_id'] == 'E2E-mock'

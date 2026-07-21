@@ -129,3 +129,28 @@ def test_checkpoint_keep_count_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('VALIDATED_RG_M3_CHECKPOINT_KEEP', 'nope')
     with pytest.raises(M3CompatibilityError):
         _checkpoint_keep_count()
+
+
+def test_tensor_shard_store_hardlinks_identical_payloads(tmp_path: Path) -> None:
+    import json
+
+    from src.checkpoint import TensorShardStore
+
+    store = TensorShardStore(64 * 1024 * 1024)
+    left = np.arange(24, dtype=np.float64).reshape(4, 6)
+    tensors = {
+        'rsvd_left': left,
+        'triad_left': left.copy(),
+        'rsvd_singular_values': np.array([1.0, 2.0], dtype=np.float64),
+    }
+    root = tmp_path / 'tensors'
+    store.save(root, tensors)
+    loaded = store.load(root)
+    np.testing.assert_array_equal(loaded['rsvd_left'], left)
+    np.testing.assert_array_equal(loaded['triad_left'], left)
+    rsvd = root / 'rsvd_left.shard-000000.npy'
+    triad = root / 'triad_left.shard-000000.npy'
+    assert rsvd.stat().st_ino == triad.stat().st_ino
+    dedup = json.loads((root / 'storage_dedup.json').read_text(encoding='utf-8'))
+    assert int(dedup['bytes_hardlinked']) > 0
+    assert int(dedup['unique_shard_files']) == 2

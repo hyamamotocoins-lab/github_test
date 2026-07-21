@@ -87,7 +87,7 @@ def run_pipeline_to_m6(
     skip_obligations: bool = False,
     skip_m6: bool = False,
     auto_strip_m3_checkpoints: bool = True,
-    persist_m3_cap_gib: float | None = 80.0,
+    persist_m3_cap_gib: float | None = 32.0,
     auto_keep_latest_m3_checkpoint: bool = True,
     max_idle_rounds: int = 2,
 ) -> dict[str, Any]:
@@ -113,7 +113,7 @@ def run_pipeline_to_m6(
     - after each round: incremental strip from this round's pre_m6/m6
       results (full-scan fallback when no preferred ids).
 
-    ``persist_m3_cap_gib`` (default 80.0; None disables): after strip,
+    ``persist_m3_cap_gib`` (default 32.0; None disables): after strip,
     enforce a ``runs/M3-*`` size cap by stripping oldest eligible runs.
 
     ``auto_keep_latest_m3_checkpoint`` (default True):

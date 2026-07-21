@@ -301,6 +301,16 @@ def run_m4_session(
         getattr(orch.state, 'phase', None) == 'M4_COMPLETE'
     )
     status = 'M4_COMPLETE' if complete else 'M4_CHECKPOINT'
+    m3_strip: dict[str, Any] | None = None
+    if complete:
+        # M4 no longer needs the M3 parent ckpt for resume; free ~hundreds of MiB now.
+        from .m3_reclaim import strip_m3_after_m4_complete
+
+        m3_strip = strip_m3_after_m4_complete(
+            persistent_root,
+            str(prepared['m3_run_id']),
+            execute=True,
+        )
     out = {
         'status': status,
         'm3_run_id': prepared['m3_run_id'],
@@ -309,6 +319,7 @@ def run_m4_session(
         'phase': getattr(orch.state, 'phase', None),
         'run_root': str(orch.run_root),
         'result': result,
+        'm3_reclaim_after_m4': m3_strip,
         **screening_only_payload(),
     }
     _write_pre_m6(package, out)

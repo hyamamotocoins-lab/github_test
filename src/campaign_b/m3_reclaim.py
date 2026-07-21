@@ -57,7 +57,9 @@ _DOWNSTREAM_READY_STATUSES = frozenset({
     'M6_COMPLETE',
 })
 
-DEFAULT_PERSIST_M3_CAP_GIB: float = 80.0
+# Aggressive default: keep total screening M3 footprint small on Paperspace.
+# Cap only strips COMPLETE+downstream-eligible runs (fail-closed).
+DEFAULT_PERSIST_M3_CAP_GIB: float = 32.0
 
 
 def fmt_bytes(n: int) -> str:
@@ -844,6 +846,38 @@ class StripReclaimSummary:
             **asdict(self),
             'bytes_freed_human': fmt_bytes(self.bytes_freed),
         }
+
+
+def strip_m3_after_m4_complete(
+    persistent_root: Path,
+    m3_run_id: str,
+    *,
+    execute: bool = True,
+    include_certified_lineage: bool = False,
+) -> dict[str, Any]:
+    """Immediately strip one M3 run after its child M4 reaches M4_COMPLETE.
+
+    Fail-closed: uses the same classify/eligibility path as batch reclaim.
+    Safe because M4 has finished verifying/consuming the M3 parent checkpoint.
+    """
+    if not isinstance(m3_run_id, str) or not m3_run_id.startswith('M3-'):
+        return {
+            'run_id': m3_run_id,
+            'stripped': 0,
+            'bytes_freed': 0,
+            'label': 'SKIP_BAD_M3_ID',
+            'execute': bool(execute),
+        }
+    summary = strip_eligible_m3_checkpoints(
+        Path(persistent_root),
+        execute=execute,
+        include_certified_lineage=include_certified_lineage,
+        only_run_ids={m3_run_id},
+    )
+    out = summary.as_dict()
+    out['trigger'] = 'm4_complete_immediate'
+    out['requested_run_id'] = m3_run_id
+    return out
 
 
 def strip_eligible_m3_checkpoints(

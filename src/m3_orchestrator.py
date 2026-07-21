@@ -335,8 +335,8 @@ class M3Orchestrator:
             )
         return result
 
-    def _cleanup_completed_run(self) -> dict[str, Any]:
-        '''Remove regenerable cache and obsolete attempts after final checkpoint.'''
+    def _cleanup_obsolete_attempts(self) -> dict[str, Any]:
+        '''Drop obsolete / temp attempt dirs; keep only referenced result parents.'''
         freed = 0
         removed_attempts = 0
         removed_temporary = 0
@@ -369,7 +369,16 @@ class M3Orchestrator:
                         shutil.rmtree(attempt)
                         freed += size
                         removed_attempts += 1
+        return {
+            'removed_attempts': removed_attempts,
+            'removed_temporary_attempts': removed_temporary,
+            'bytes_freed': freed,
+        }
+
+    def _cleanup_regenerable_cache(self) -> dict[str, Any]:
+        '''Delete contraction-path cache (rebuildable from M2 parent + config).'''
         cache = self.run_root / 'cache'
+        freed = 0
         removed_cache_files = 0
         if cache.is_dir() and not cache.is_symlink():
             for child in list(cache.iterdir()):
@@ -382,16 +391,53 @@ class M3Orchestrator:
                     child.unlink()
                 freed += size
                 removed_cache_files += 1
-        payload = {
-            'removed_attempts': removed_attempts,
-            'removed_temporary_attempts': removed_temporary,
+        return {
             'removed_cache_entries': removed_cache_files,
+            'bytes_freed': freed,
+        }
+
+    def _write_minimal_receipt(self, checkpoint: CheckpointSaveResult) -> Path:
+        '''Persist a small resume/handoff receipt; tensors stay in the one ckpt.'''
+        dedup_path = checkpoint.path / 'tensors' / 'storage_dedup.json'
+        dedup = read_json(dedup_path) if dedup_path.is_file() else {}
+        tensor_names = sorted(self.tensors)
+        receipt = {
+            'schema_version': 1,
+            'run_id': self.state.run_id,
+            'phase': self.state.phase,
+            'written_at': utc_now(),
+            'final_checkpoint': checkpoint.path.name,
+            'checkpoint_index': checkpoint.index,
+            'checkpoint_size_bytes': checkpoint.size_bytes,
+            'tensor_names': tensor_names,
+            'tensor_dedup': dedup if isinstance(dedup, dict) else {},
+            'retained_for_m4': True,
+            'note': (
+                'Minimal receipt for audit/resume status. Bulky RSVD/Triad '
+                'tensors live only in the newest verified checkpoint until '
+                'downstream M4_COMPLETE (then strip). Path cache and obsolete '
+                'attempts are deleted at M3_COMPLETE.'
+            ),
+        }
+        path = self.run_root / 'reports' / 'M3_RECEIPT.json'
+        atomic_write_json(path, receipt)
+        return path
+
+    def _cleanup_completed_run(self) -> dict[str, Any]:
+        '''Remove regenerable cache and obsolete attempts after final checkpoint.'''
+        attempts = self._cleanup_obsolete_attempts()
+        cache = self._cleanup_regenerable_cache()
+        freed = int(attempts['bytes_freed']) + int(cache['bytes_freed'])
+        payload = {
+            'removed_attempts': attempts['removed_attempts'],
+            'removed_temporary_attempts': attempts['removed_temporary_attempts'],
+            'removed_cache_entries': cache['removed_cache_entries'],
             'bytes_freed': freed,
             'final_checkpoint_retained_for_m4': True,
             'note': (
                 'The newest M3 checkpoint is retained because M4 consumes the '
                 'RSVD/Triad tensors. Full checkpoint stripping is safe only after '
-                'downstream M4/M5/M6 progress.'
+                'downstream M4_COMPLETE (immediate strip on M4 handoff).'
             ),
         }
         self._record_storage_cleanup('m3_complete_cleanup', payload)
@@ -407,11 +453,16 @@ class M3Orchestrator:
         self.guard.mark_checkpoint()
         self.last_checkpoint = result
         cleanup = self._prune_old_checkpoints()
+        # Mid-run: drop obsolete attempts early so failed retries do not linger.
+        attempt_cleanup = self._cleanup_obsolete_attempts()
+        if attempt_cleanup['bytes_freed']:
+            self._record_storage_cleanup('mid_run_attempt_cleanup', attempt_cleanup)
         self.logger.emit(
             'm3_checkpoint_committed', run_id=self.state.run_id,
             checkpoint=result.index, reason=reason, size_bytes=result.size_bytes,
             old_checkpoints_removed=cleanup['removed'],
-            bytes_freed=cleanup['bytes_freed'],
+            bytes_freed=cleanup['bytes_freed'] + attempt_cleanup['bytes_freed'],
+            obsolete_attempts_removed=attempt_cleanup['removed_attempts'],
         )
         print(f'M3 checkpoint {result.index:06d} committed and verified: {result.path}')
         return result
@@ -784,6 +835,7 @@ class M3Orchestrator:
                 self.state.phase = 'M3_COMPLETE'
                 final_checkpoint = self.checkpoint('M3 acceptance gates complete')
                 self._cleanup_completed_run()
+                self._write_minimal_receipt(final_checkpoint)
                 paths = write_m3_report_package(
                     self.run_root, self.config, self.state, self.queue,
                     self.test_report, final_checkpoint, self.manifest,

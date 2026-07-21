@@ -88,7 +88,7 @@ disable_session_wallclock: true
 # M3 storage reclaim（97 と同じ既定）
 auto_strip_m3_checkpoints: true
 auto_keep_latest_m3_checkpoint: true
-persist_m3_cap_gib: 80.0
+persist_m3_cap_gib: 32.0
 ```
 
 ## 5.1 M3 ストレージ回収（96 = 97 と同じ）
@@ -97,7 +97,7 @@ persist_m3_cap_gib: 80.0
 
 1. セッション開始: 全 `runs/M3-*` へフル keep-latest
 2. セッション開始 / 各ラウンド後: COMPLETE+downstream の strip-checkpoints
-3. `persist_m3_cap_gib`（既定 80）でサイズキャップ
+3. `persist_m3_cap_gib`（既定 32）でサイズキャップ
 4. `run_gpu_m3_batch(..., auto_keep_latest_m3_checkpoint=...)` で per-M3 trim
 
 要約フィールド: `m3_reclaim.session_start_keep_latest` / `session_start_full_scan` /
