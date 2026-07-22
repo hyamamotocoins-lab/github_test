@@ -598,8 +598,11 @@ def ensure_pre_m6_index(
 def _obligation_row_for_package(
     package: Path,
     persistent_root: Path,
+    *,
+    include_errors: bool = False,
 ) -> dict[str, Any] | None:
     from .pre_m6_batch import (
+        PRE_M6_BLOCKED_EXCLUDED,
         _child_ids,
         _load,
         _m4_complete_on_disk,
@@ -608,6 +611,9 @@ def _obligation_row_for_package(
 
     package = Path(package)
     persistent_root = Path(persistent_root)
+    status = _pre_m6_status(package)
+    if status in PRE_M6_BLOCKED_EXCLUDED and not include_errors:
+        return None
     child = _child_ids(package)
     if not isinstance(child, dict):
         return None
@@ -636,7 +642,7 @@ def _obligation_row_for_package(
         'm4_run_id': m4_id,
         'm5_run_id': m5_id,
         'open_obligations': open_ids,
-        'pre_m6_status': _pre_m6_status(package),
+        'pre_m6_status': status,
     }
 
 
@@ -691,6 +697,7 @@ def _scan_obligation_rows(
     *,
     only_campaign_run_id: str | None = None,
     max_candidates: int | None = None,
+    include_errors: bool = False,
 ) -> list[dict[str, Any]]:
     from .advance_selected import discover_selected_packages
 
@@ -701,7 +708,9 @@ def _scan_obligation_rows(
     rows: list[dict[str, Any]] = []
     limit = int(max_candidates) if max_candidates is not None else None
     for package in packages:
-        row = _obligation_row_for_package(package, persistent_root)
+        row = _obligation_row_for_package(
+            package, persistent_root, include_errors=include_errors,
+        )
         if row is None:
             continue
         rows.append(row)
@@ -715,8 +724,11 @@ def list_obligation_queue_indexed(
     *,
     max_candidates: int | None = None,
     only_campaign_run_id: str | None = None,
+    include_errors: bool = False,
 ) -> list[dict[str, Any]] | None:
     if _index_disabled():
+        return None
+    if include_errors:
         return None
     persistent_root = Path(persistent_root)
     path = _index_path(persistent_root, _OBLIGATION_INDEX_NAME)

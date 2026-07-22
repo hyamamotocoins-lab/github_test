@@ -473,6 +473,14 @@ Campaign B の shared M2 は通常 `j2_max=2` なので M3 も 2 にピンされ
 
 M4 完了済みで、`M5_obligation_report.json` が無い、または `all_closed` でない / `open_obligations` が残るパッケージ。パス順（**`q_upper` ソートなし**）。索引: `campaign_b/_indexes/obligation_queue.json`。
 
+デフォルト除外（`include_errors=False`、pre_m6 と同型）:
+
+- `M4_BLOCKED`
+- `M5_BLOCKED`
+- `M5_BLOCKED_M4_REGRESSION`
+
+義務ステージで `M5ParentError` / FD 回帰などが起きたときは `PRE_M6.json` に durable block を書き、索引から外す。`--include-errors` / `include_errors=True` で再試行可能。
+
 ### 5.2 再評価（`reevaluate_one`）
 
 1. 再度 `run_m5_session`（staged M5 を回し直し、live 組立と義務評価を更新）。

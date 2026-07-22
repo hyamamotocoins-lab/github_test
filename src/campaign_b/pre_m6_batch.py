@@ -221,8 +221,8 @@ def _write_pre_m6(package: Path, payload: dict[str, Any]) -> None:
 
         root = _persistent_root_from_package(package)
         sync_pre_m6_index_entry(package, root)
-        if doc.get('status') == 'PRE_M6_READY':
-            sync_obligation_index_entry(package, root)
+        # Always sync: PRE_M6_READY may add; blocked/closed statuses remove.
+        sync_obligation_index_entry(package, root)
     except Exception:  # noqa: BLE001 — best-effort index maintenance
         pass
 

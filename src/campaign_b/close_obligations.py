@@ -29,7 +29,15 @@ def list_obligation_queue(
     *,
     max_candidates: int | None = None,
     only_campaign_run_id: str | None = None,
+    include_errors: bool = False,
 ) -> list[dict[str, Any]]:
+    """Packages with M4 done that still need obligation re-eval.
+
+    Durable PRE_M6 blocked statuses (M4_BLOCKED / M5_BLOCKED /
+    M5_BLOCKED_M4_REGRESSION) are excluded unless include_errors=True,
+    matching list_pre_m6_queue so one poison package cannot monopolize
+    MAX_OBLIGATION_PACKAGES=1.
+    """
     persistent_root = Path(persistent_root)
     from .queue_index import (
         _scan_obligation_rows,
@@ -37,6 +45,14 @@ def list_obligation_queue(
         list_obligation_queue_indexed,
         rebuild_obligation_index,
     )
+
+    if include_errors:
+        return _scan_obligation_rows(
+            persistent_root,
+            only_campaign_run_id=only_campaign_run_id,
+            max_candidates=max_candidates,
+            include_errors=True,
+        )
 
     ensure_obligation_index(
         persistent_root,
@@ -160,25 +176,42 @@ def run_close_obligations_batch(
     max_packages: int = 4,
     max_queue: int = 50,
     only_campaign_run_id: str | None = None,
+    include_errors: bool = False,
 ) -> dict[str, Any]:
-    from .queue_index import fetch_limit_for_batch
+    from .pre_m6_batch import (
+        PRE_M6_BLOCKED_EXCLUDED,
+        _classify_pre_m6_failure,
+        _pre_m6_status,
+    )
+    from .queue_index import fetch_limit_for_batch, sync_obligation_index_entry
 
     fetch = fetch_limit_for_batch(
         max_items=int(max_packages),
         max_queue=int(max_queue),
     )
+    # Oversample so mid-scan blocked skips can still fill max_packages.
+    scan_limit = max(fetch, int(max_packages) * 8)
+    scan_limit = min(scan_limit, int(max_queue)) if max_queue else scan_limit
     queue = list_obligation_queue(
         persistent_root,
-        max_candidates=fetch,
+        max_candidates=scan_limit,
         only_campaign_run_id=only_campaign_run_id,
+        include_errors=include_errors,
     )
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
+    skipped_blocked: list[str] = []
     started = utc_now()
-    for index, row in enumerate(queue):
-        if index >= int(max_packages):
+    attempted = 0
+    for row in queue:
+        if attempted >= int(max_packages):
             break
         package = Path(row['package'])
+        current = _pre_m6_status(package)
+        if current in PRE_M6_BLOCKED_EXCLUDED and not include_errors:
+            skipped_blocked.append(str(package.name))
+            continue
+        attempted += 1
         try:
             results.append(
                 reevaluate_one(
@@ -188,10 +221,26 @@ def run_close_obligations_batch(
                 )
             )
         except Exception as exc:  # noqa: BLE001
+            blocked = _classify_pre_m6_failure(exc)
+            msg = f'{type(exc).__name__}: {exc}'
+            child = _child_ids(package) or {}
+            _write_pre_m6(package, {
+                'status': blocked,
+                'error': msg,
+                'blocked_durable': True,
+                'm4_run_id': child.get('M4'),
+                'm5_run_id': child.get('M5'),
+                'stage': 'OBLIGATIONS',
+            })
+            try:
+                sync_obligation_index_entry(package, persistent_root)
+            except Exception:  # noqa: BLE001
+                pass
             err = {
                 'package': str(package),
                 'candidate_id': row.get('candidate_id'),
-                'error': f'{type(exc).__name__}: {exc}',
+                'error': msg,
+                'status': blocked,
                 **screening_only_payload(),
             }
             errors.append(err)
@@ -201,7 +250,9 @@ def run_close_obligations_batch(
         'started_at': started,
         'finished_at': utc_now(),
         'queue_size': len(queue),
-        'attempted': len(results) + len(errors),
+        'attempted': attempted,
+        'skipped_blocked': skipped_blocked[:50],
+        'include_errors': bool(include_errors),
         'all_closed_count': sum(1 for r in results if r.get('all_closed')),
         'm5_complete_count': sum(1 for r in results if r.get('m5_complete')),
         'still_open': [
@@ -219,7 +270,9 @@ def run_close_obligations_batch(
         'note': (
             'Re-evaluated M5 obligations with j2-aware projector cover and live '
             'M3/M2 lineage parents. Does not fake CERTIFIED. Production M6 (81) '
-            'still needs ONE_STEP_CERTIFIED.'
+            'still needs ONE_STEP_CERTIFIED. '
+            'M4_BLOCKED / M5_BLOCKED / M5_BLOCKED_M4_REGRESSION leave the '
+            'default obligation queue (include_errors to retry).'
         ),
         **screening_only_payload(),
     }
@@ -244,6 +297,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--max-packages', type=int, default=4)
     parser.add_argument('--max-queue', type=int, default=50)
     parser.add_argument('--campaign-run-id', default=None)
+    parser.add_argument(
+        '--include-errors',
+        action='store_true',
+        help='Include durable M4/M5 blocked packages in the queue',
+    )
     parser.add_argument('--list-only', action='store_true')
     args = parser.parse_args(argv)
     persist = Path(args.persistent_root)
@@ -252,6 +310,7 @@ def main(argv: list[str] | None = None) -> int:
             persist,
             max_candidates=args.max_queue,
             only_campaign_run_id=args.campaign_run_id,
+            include_errors=args.include_errors,
         )
         print(json.dumps({'queue_size': len(queue), 'top': queue[:20]}, indent=2))
         return 0
@@ -261,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         max_packages=args.max_packages,
         max_queue=args.max_queue,
         only_campaign_run_id=args.campaign_run_id,
+        include_errors=args.include_errors,
     )
     print(json.dumps({
         'session_id': summary.get('session_id'),
