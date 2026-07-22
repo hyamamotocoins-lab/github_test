@@ -414,6 +414,15 @@ Campaign B の shared M2 は通常 `j2_max=2` なので M3 も 2 にピンされ
 
 キュー優先: `NEED_M5`（M4 完了済）を `NEED_M4` より先。q_upper 昇順。
 
+デフォルト除外（`include_errors=False`、M3 の `M3_BLOCKED_NONFINITE` と同型）:
+
+- `M4_BLOCKED` / `M5_BLOCKED` / `M5_BLOCKED_M4_REGRESSION`
+- 例: `M5ParentError: M4 centered finite difference lacks second-order convergence.`
+  （`MIN_CENTERED_FD_ACCEPTANCE_ORDER=1.8` の fail-closed；**緩和しない**・**CERTIFIED にしない**）
+- ブロック済み head はキューから外れ、次候補が `MAX_PRE_M6=1` でも進む。
+- 再試行: `--include-errors` / `include_errors=True`。解除は M4 側を直したうえで
+  `PRE_M6.json` の blocked status を消すか上書き（下記 §10）。
+
 ### 4.1 M4（`run_m4_session`）
 
 処理概要（`m4_orchestrator` / `M4_PHASES`）:
@@ -625,6 +634,11 @@ advance → gpu_m3 → pre_m6 → obligations → m6
 - **j2 の二層:** screening 候補の `j2∈{2,3,4}` はスキーム探索軸。実行系 M2/M3 のカットオフは shared M2 の `j2_max`（通常 2）に固定。高 j2 候補でも M3 次元は親 M2 に従う。
 - **タイミング:** 1 M3 セッションが 6h 枠に収まる設計。j2=2・rank 大の RSVD 実時間はマシン依存 → `[要確認]` Paperspace GPU 実測で更新すること。
 - **再実行:** 各段はパッケージ内 status JSON と `runs/` チェックポイントで resume。`force` は advance のみ明示フラグ。
+- **pre_m6 poison package:** `PRE_M6.json` が `M4_BLOCKED` / `M5_BLOCKED` /
+  `M5_BLOCKED_M4_REGRESSION` の候補はデフォルトキューから除外される（例:
+  `B-0b31d2ec0d8be5ce` の FD 2次収束失敗）。放置してよい。再挑戦する場合のみ
+  (1) M4 FD / parent を修正し (2) `PRE_M6.json` の blocked status を削除または
+  `M4_CHECKPOINT` 等に戻し (3) 必要なら `--include-errors`。FD しきい値は緩めない。
 
 ---
 
@@ -645,6 +659,7 @@ M3_RUNNING | M3_CHECKPOINT | M3_COMPLETE | M3_BLOCKED_BAD_M2 | M3_ERROR
 # PRE_M6.json
 M4_RUNNING | M4_COMPLETE | M4_CHECKPOINT | M5_RUNNING | PRE_M6_READY
 M4_BLOCKED | M5_BLOCKED | M5_BLOCKED_M4_REGRESSION
+  # ↑ 3 blocked: default list_pre_m6_queue 除外（include_errors で再試行）
 
 # M6_GATE.json
 BLOCKED_PRE_M6 | READY_FOR_STAGED_M6 | M6_DONE | M6_FAILED

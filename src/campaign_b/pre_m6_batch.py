@@ -37,6 +37,37 @@ DEFAULT_M4_TEST_REPORT: dict[str, str] = {
     'note': 'Batch default aligned with notebook 75; full pytest optional.',
 }
 
+# Durable fail-closed parent/regression failures. Mirror M3_BLOCKED_NONFINITE:
+# excluded from the default pre_m6 queue so one poison package cannot monopolize
+# MAX_PRE_M6=1. Operators re-include with include_errors=True after fixing M4.
+PRE_M6_BLOCKED_EXCLUDED: frozenset[str] = frozenset({
+    'M4_BLOCKED',
+    'M5_BLOCKED',
+    'M5_BLOCKED_M4_REGRESSION',
+})
+
+
+def _classify_pre_m6_failure(exc: BaseException) -> str:
+    """Map exceptions to durable PRE_M6.json statuses (never CERTIFIED)."""
+    name = type(exc).__name__
+    msg = f'{name}: {exc}'
+    lower = msg.lower()
+    # M4 centered-FD order / regression gates are intentional fail-closed.
+    if (
+        'does not converge' in lower
+        or 'second-order convergence' in lower
+        or 'finite-difference' in lower
+        or 'finite difference' in lower
+        or 'regression' in lower
+    ):
+        return 'M5_BLOCKED_M4_REGRESSION'
+    # Do not use "'M5' not in msg" — M5ParentError always contains "M5".
+    if name == 'M5ParentError':
+        return 'M5_BLOCKED'
+    if 'M4' in msg and name != 'M5ParentError':
+        return 'M4_BLOCKED'
+    return 'M5_BLOCKED'
+
 
 def _load(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
@@ -106,8 +137,14 @@ def list_pre_m6_queue(
     max_candidates: int | None = None,
     only_campaign_run_id: str | None = None,
     include_complete: bool = False,
+    include_errors: bool = False,
 ) -> list[dict[str, Any]]:
-    """Packages with completed M3 that still need M4/M5 (stop before M6)."""
+    """Packages with completed M3 that still need M4/M5 (stop before M6).
+
+    Durable blocked statuses (M4_BLOCKED / M5_BLOCKED /
+    M5_BLOCKED_M4_REGRESSION) are excluded unless include_errors=True,
+    matching list_gpu_m3_queue's M3_BLOCKED_NONFINITE pattern.
+    """
     persistent_root = Path(persistent_root)
     rows: list[dict[str, Any]] = []
     for package in discover_selected_packages(persistent_root):
@@ -115,6 +152,8 @@ def list_pre_m6_queue(
             continue
         status = _pre_m6_status(package)
         if status == 'PRE_M6_READY' and not include_complete:
+            continue
+        if status in PRE_M6_BLOCKED_EXCLUDED and not include_errors:
             continue
         child = _child_ids(package)
         if not isinstance(child, dict):
@@ -511,21 +550,33 @@ def run_pre_m6_batch(
     max_stage_sessions: int = 4,
     max_queue: int = 50,
     only_campaign_run_id: str | None = None,
+    include_errors: bool = False,
 ) -> dict[str, Any]:
     persistent_root = Path(persistent_root)
     project_root = Path(project_root)
+    # Over-fetch so skipping already-blocked mid-scan still fills max_packages.
+    scan_limit = max(int(max_queue), int(max_packages) * 8)
     queue = list_pre_m6_queue(
         persistent_root,
-        max_candidates=max_queue,
+        max_candidates=scan_limit,
         only_campaign_run_id=only_campaign_run_id,
+        include_errors=include_errors,
     )
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
+    skipped_blocked: list[str] = []
     started = utc_now()
-    for index, row in enumerate(queue):
-        if index >= int(max_packages):
+    attempted = 0
+    for row in queue:
+        if attempted >= int(max_packages):
             break
         package = Path(row['package'])
+        # Re-check on disk: one poison package must not consume MAX_PRE_M6=1.
+        current = _pre_m6_status(package)
+        if current in PRE_M6_BLOCKED_EXCLUDED and not include_errors:
+            skipped_blocked.append(str(package.name))
+            continue
+        attempted += 1
         try:
             results.append(
                 advance_one_toward_pre_m6(
@@ -537,22 +588,19 @@ def run_pre_m6_batch(
             )
         except Exception as exc:  # noqa: BLE001
             msg = f'{type(exc).__name__}: {exc}'
-            if 'does not converge' in msg or 'regression' in msg.lower():
-                status = 'M5_BLOCKED_M4_REGRESSION'
-            elif 'M4' in msg and 'M5' not in msg:
-                status = 'M4_BLOCKED'
-            else:
-                status = 'M5_BLOCKED'
+            status = _classify_pre_m6_failure(exc)
             err = {
                 'package': str(package),
                 'candidate_id': row.get('candidate_id'),
                 'error': msg,
+                'status': status,
                 **screening_only_payload(),
             }
             errors.append(err)
             _write_pre_m6(package, {
                 'status': status,
                 'error': err['error'],
+                'blocked_durable': True,
                 'm4_complete': _m4_complete_on_disk(
                     persistent_root, str((_child_ids(package) or {}).get('M4') or ''),
                 ),
@@ -565,13 +613,17 @@ def run_pre_m6_batch(
         'finished_at': utc_now(),
         'queue_size': len(queue),
         'packages_attempted': len(results) + len(errors),
+        'skipped_blocked': skipped_blocked[:50],
+        'include_errors': bool(include_errors),
         'pre_m6_ready': sum(1 for r in results if r.get('status') == 'PRE_M6_READY'),
         'm4_checkpoint': sum(1 for r in results if r.get('status') == 'M4_CHECKPOINT'),
         'errors': errors[:50],
         'results': results,
         'note': (
             'Stops after M5. Production M6 is forbidden. '
-            'See package M6_GATE.json = BLOCKED_PRE_M6.'
+            'See package M6_GATE.json = BLOCKED_PRE_M6. '
+            'M4_BLOCKED / M5_BLOCKED / M5_BLOCKED_M4_REGRESSION leave the '
+            'default queue (include_errors=True to retry).'
         ),
         **screening_only_payload(),
     }
@@ -598,6 +650,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--max-stage-sessions', type=int, default=4)
     parser.add_argument('--max-queue', type=int, default=50)
     parser.add_argument('--campaign-run-id', default=None)
+    parser.add_argument(
+        '--include-errors',
+        action='store_true',
+        help=(
+            'Include M4_BLOCKED / M5_BLOCKED / M5_BLOCKED_M4_REGRESSION '
+            'packages for retry (default queue excludes them).'
+        ),
+    )
     parser.add_argument('--list-only', action='store_true')
     args = parser.parse_args(argv)
     persist = Path(args.persistent_root)
@@ -606,6 +666,7 @@ def main(argv: list[str] | None = None) -> int:
             persist,
             max_candidates=args.max_queue,
             only_campaign_run_id=args.campaign_run_id,
+            include_errors=args.include_errors,
         )
         print(json.dumps({'queue_size': len(queue), 'top': queue[:20]}, indent=2))
         return 0
@@ -616,6 +677,7 @@ def main(argv: list[str] | None = None) -> int:
         max_stage_sessions=args.max_stage_sessions,
         max_queue=args.max_queue,
         only_campaign_run_id=args.campaign_run_id,
+        include_errors=args.include_errors,
     )
     print(json.dumps({
         'session_id': summary.get('session_id'),
