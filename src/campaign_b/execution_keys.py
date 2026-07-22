@@ -11,8 +11,8 @@ They use a shorter stale threshold (default 15 min via
 ``FOREIGN_HOST_STALE_HEARTBEAT_SEC`` / env ``VALIDATED_RG_GPU_LANE_FOREIGN_STALE_SEC``)
 so a dead lock from a previous hostname is reclaimable without a manual ``rm``.
 
-Live multi-machine GPU consumers must call ``refresh_gpu_lane_heartbeat`` during
-long work; 15 minutes without refresh ⇒ reclaimable after host change or crash.
+Live GPU consumers must call ``refresh_gpu_lane_heartbeat`` during long work;
+15 minutes without refresh ⇒ reclaimable (same host or foreign host).
 Same-host dead PID remains immediately reclaimable.
 """
 
@@ -52,11 +52,12 @@ __all__ = [
 
 GPU_LOCK_NAME = 'gpu_lane'
 M3_EXECUTION_KEY = 'shared_m3_batch'
-# Match the six-hour GPU session budget; dead-PID reclaim is the primary path
-# for same-host crashes.
-DEFAULT_STALE_HEARTBEAT_SEC = 6 * 3600
-# Paperspace host change: cannot probe remote PID; reclaim after short silence.
-FOREIGN_HOST_STALE_HEARTBEAT_SEC = 15 * 60
+# Same-host and foreign-host heartbeat silence before reclaim (ops default).
+# Dead-PID reclaim on the same host remains immediate. Long consumers must
+# refresh heartbeats (pipeline rounds, M3 batch, etc.).
+DEFAULT_STALE_HEARTBEAT_SEC = 15 * 60
+# Paperspace host change: cannot probe remote PID; uses the same threshold.
+FOREIGN_HOST_STALE_HEARTBEAT_SEC = DEFAULT_STALE_HEARTBEAT_SEC
 _FOREIGN_STALE_ENV = 'VALIDATED_RG_GPU_LANE_FOREIGN_STALE_SEC'
 
 # Nested hold depth per resolved persistent_root (same process only).
@@ -186,8 +187,8 @@ def _write_lease(
         'enforced': True,
         'note': (
             'Exclusive GPU lane lease. Fail closed if held by another live process. '
-            'Same-host dead pid reclaims immediately; foreign-host reclaim uses the '
-            'shorter FOREIGN_HOST_STALE_HEARTBEAT_SEC threshold. Live holders must '
+            'Same-host dead pid reclaims immediately; stale heartbeat reclaims after '
+            f'{DEFAULT_STALE_HEARTBEAT_SEC}s without refresh. Live holders must '
             'refresh heartbeats during long work.'
         ),
         **screening_only_payload(),
@@ -244,8 +245,8 @@ def acquire_gpu_lock(
     """Acquire exclusive GPU lane lease or fail closed.
 
     Same-process nested calls increment depth and refresh heartbeat.
-    Foreign-host stale threshold defaults to 15 min (see
-    ``foreign_stale_heartbeat_sec``).
+    Stale heartbeat threshold defaults to 15 min (same host and foreign host;
+    see ``foreign_stale_heartbeat_sec``).
     """
     persistent_root = Path(persistent_root)
     key = _root_key(persistent_root)
@@ -300,8 +301,9 @@ def acquire_gpu_lock(
                 f"heartbeat_at={doc.get('heartbeat_at')!r} "
                 f'path={path}. '
                 'Do not run notebook 96 and 97 (or two GPU consumers) together. '
-                'Wait for the holder to finish, or reclaim only after the process is dead '
-                f'(foreign host: after {foreign_sec}s without heartbeat).'
+                'Wait for the holder to finish, or reclaim after dead PID or stale '
+                f'heartbeat (same host: {stale_heartbeat_sec}s, '
+                f'foreign host: {foreign_sec}s without refresh).'
             )
         reclaimed_from = (
             f"owner={doc.get('owner')} pid={doc.get('pid')} "

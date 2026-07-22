@@ -586,6 +586,12 @@ def run_one_gpu_m3(
         'phase': 'starting',
         'consecutive_failures': prev_fail,
     })
+    try:
+        from .execution_keys import refresh_gpu_lane_heartbeat
+
+        refresh_gpu_lane_heartbeat(persistent_root)
+    except Exception:  # noqa: BLE001 — best-effort only
+        pass
     os.environ.setdefault('VALIDATED_RG_M3_ALLOW_CODE_DRIFT', '1')
     # In-orchestrator prune after each verified ckpt (default keep=1).
     # Complements Campaign B keep-latest reclaim; do not raise min to >1 here.

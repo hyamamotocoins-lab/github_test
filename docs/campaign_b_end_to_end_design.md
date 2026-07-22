@@ -108,8 +108,8 @@ persist_m3_cap_gib: 32.0
 
 - `pipeline_recovery.recover_interrupted_work` — `*.tmp` 掃除、stale lease ディレクトリ stub
 - `execution_keys` — **排他 GPU lease**（heartbeat + pid/hostname）。
-  死んだ PID または古い heartbeat は acquire 時に reclaim。
-  生存プロセスの lease は奪わない（`GpuLaneHeldError`）。
+  死んだ PID または **15 分超の古い heartbeat** は acquire 時に reclaim（同ホスト・外国ホスト共通）。
+  生存プロセスが heartbeat を更新し続けている間は奪わない（`GpuLaneHeldError`）。
 - Notebook 97 drain path（default）は outer lease を取らず、
   `run_pipeline_to_m6` の `owner=pipeline_to_m6` のみ。interrupted 時の
   lease owner 表示が pipeline と一致する。

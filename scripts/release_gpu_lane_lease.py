@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         '--stale-heartbeat-sec',
         type=int,
         default=None,
-        help='Same-host stale heartbeat seconds (default: 6h).',
+        help='Same-host stale heartbeat seconds (default: 15m).',
     )
     parser.add_argument(
         '--foreign-stale-sec',

@@ -185,6 +185,39 @@ def test_foreign_host_fresh_heartbeat_not_stale(tmp_path: Path) -> None:
     assert refused['action'] == 'refused'
 
 
+def test_same_host_stale_heartbeat_after_15m_reclaimable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same host + heartbeat older than 15m → reclaimable (zombie kernel)."""
+    _clear_depth(tmp_path)
+    monkeypatch.setattr(
+        'src.campaign_b.execution_keys._pid_alive',
+        lambda _pid: True,
+    )
+    path = gpu_lane_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    old = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=FOREIGN_HOST_STALE_HEARTBEAT_SEC + 60)
+    ).isoformat()
+    atomic_write_json(path, {
+        'schema_version': 1,
+        'key': 'gpu_lane',
+        'owner': 'zombie_kernel',
+        'pid': 16_650,
+        'hostname': socket.gethostname(),
+        'acquired_at': old,
+        'heartbeat_at': old,
+        'depth': 1,
+        'enforced': True,
+    })
+    lease = acquire_gpu_lock(tmp_path, owner='fresh_start')
+    assert lease['owner'] == 'fresh_start'
+    assert 'stale_heartbeat' in str(lease.get('reclaimed_from'))
+    release_gpu_lock(tmp_path, owner='fresh_start')
+
+
 def test_same_host_dead_pid_reclaimable(tmp_path: Path) -> None:
     _clear_depth(tmp_path)
     path = gpu_lane_path(tmp_path)
