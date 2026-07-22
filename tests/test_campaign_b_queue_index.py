@@ -43,8 +43,24 @@ def test_gpu_m3_index_early_exit_max_one(tmp_path: Path) -> None:
 
     queue = list_gpu_m3_queue(tmp_path, max_candidates=1)
     assert len(queue) == 1
+    # Path order among fresh READY (no q_upper ranking).
     assert queue[0]['candidate_id'] == 'CAND-00'
-    assert queue[0]['q_upper'] == 0.5
+    assert queue[0]['q_upper'] is None
+
+
+def test_gpu_m3_resume_outranks_fresh(tmp_path: Path) -> None:
+    _pkg(tmp_path, 'M7-R', 'CAND-fresh', q=0.1)
+    resume = _pkg(tmp_path, 'M7-R', 'CAND-resume', q=0.9)
+    atomic_write_json(resume / 'GPU_M3.json', {
+        'status': 'M3_CHECKPOINT',
+        'consecutive_failures': 0,
+        'certification_status': CERTIFICATION_STATUS,
+        'claim_scope': CLAIM_SCOPE,
+    })
+    rebuild_gpu_m3_index(tmp_path)
+    queue = list_gpu_m3_queue(tmp_path, max_candidates=2)
+    assert queue[0]['candidate_id'] == 'CAND-resume'
+    assert queue[1]['candidate_id'] == 'CAND-fresh'
 
 
 def test_gpu_m3_index_updates_on_status_write(tmp_path: Path) -> None:

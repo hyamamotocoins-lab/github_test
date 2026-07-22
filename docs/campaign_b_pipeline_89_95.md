@@ -210,10 +210,10 @@ campaign_b/{campaign_run_id}/selected/{candidate_id}/
 
 ソートキー（昇順）:
 
-1. `queue_tier` 0: 健全な `M3_RUNNING` / `M3_CHECKPOINT`（resume 優先）。
+1. `queue_tier` 0: 健全な `M3_RUNNING` / `M3_CHECKPOINT`（**resume のみ優先**）。
 2. `queue_tier` 1: 未着手 READY（`GPU_M3` なし）など。
 3. `queue_tier` 2: 繰り返し失敗 / エラー（通常はデフォルトキューから除外）。
-4. 同一 tier 内は `q_upper` 昇順、パスでタイブレーク。
+4. 同一 tier 内は **パス順**（discovery）。**`q_upper` ソートはしない**（drain 運用向け）。
 
 デフォルト除外（`include_errors=False`）:
 
@@ -227,11 +227,13 @@ NaN/Inf で JSON シリアライズに失敗したセッションは fail-closed
 
 バッチは `max_sessions` 件だけ **逐次** `run_one_gpu_m3`（単一 GPU 前提）。
 
-**キュー索引（v2026-07）:** `{PERSIST}/campaign_b/_indexes/gpu_m3_queue.json` と
-`pre_m6_queue.json` にソートキーだけをキャッシュ（~50–100 B/件、合計通常 **<1 MiB**）。
-`max_candidates=1` 運用では索引を先頭から検証して early-exit（全 ~9000 件走査しない）。
-初回または索引欠落時のみフル再構築。`VALIDATED_RG_DISABLE_QUEUE_INDEX=1` で従来の全走査に戻す。
+**キュー索引（v2）:** `{PERSIST}/campaign_b/_indexes/gpu_m3_queue.json` と
+`pre_m6_queue.json` に **resume / stage tier** だけをキャッシュ（`q_upper` なし）。
+`max_candidates=1` 運用では索引を先頭から検証して early-exit。
+旧 v1 索引（q ソート）は schema mismatch で自動再構築。
+`VALIDATED_RG_DISABLE_QUEUE_INDEX=1` で従来の全走査に戻す。
 状態更新は `ADVANCE` / `GPU_M3` / `PRE_M6` 書き込み時に増分同期。
+pre_m6 は `NEED_M5` を `NEED_M4` より先（中断パイプライン消化）、あとはパス順。
 
 ### 3.2 `prepare_package_for_m3`
 

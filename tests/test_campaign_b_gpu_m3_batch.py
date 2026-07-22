@@ -42,7 +42,8 @@ def _pkg(root: Path, campaign: str, cand: str, *, q: float, ready: bool = True) 
     return pkg
 
 
-def test_list_gpu_m3_queue_ranks_by_q(tmp_path: Path) -> None:
+def test_list_gpu_m3_queue_resume_before_fresh(tmp_path: Path) -> None:
+    """Drain order: resume first; no q_upper ranking among fresh packages."""
     _pkg(tmp_path, 'M7-A', 'CAND-hi', q=0.95)
     _pkg(tmp_path, 'M7-A', 'CAND-lo', q=0.81)
     _pkg(tmp_path, 'M7-A', 'CAND-skip', q=0.70, ready=False)
@@ -54,8 +55,12 @@ def test_list_gpu_m3_queue_ranks_by_q(tmp_path: Path) -> None:
     })
 
     queue = list_gpu_m3_queue(tmp_path, max_candidates=10)
-    assert [r['candidate_id'] for r in queue] == ['CAND-lo', 'CAND-hi']
-    assert queue[0]['q_upper'] == 0.81
+    ids = [r['candidate_id'] for r in queue]
+    assert 'CAND-done' not in ids
+    assert 'CAND-skip' not in ids
+    assert set(ids) == {'CAND-hi', 'CAND-lo'}
+    # Stable path order among same tier (discovery sort), not q_upper.
+    assert ids == sorted(ids)
 
 
 def test_list_gpu_m3_queue_excludes_error_and_nonfinite(tmp_path: Path) -> None:

@@ -143,7 +143,7 @@ def test_run_pre_m6_skips_blocked_and_advances_next(tmp_path: Path) -> None:
             'claim_scope': CLAIM_SCOPE,
         }
 
-    # include_errors=True puts poison first by q; batch must skip and take next.
+    # Durable-blocked packages are excluded from the default queue; healthy proceeds.
     with patch(
         'src.campaign_b.pre_m6_batch.advance_one_toward_pre_m6',
         side_effect=_fake_advance,
@@ -166,8 +166,9 @@ def test_run_pre_m6_skips_blocked_and_advances_next(tmp_path: Path) -> None:
 def test_run_pre_m6_writes_durable_block_and_drops_from_queue(
     tmp_path: Path,
 ) -> None:
-    poison = _ready_pkg(tmp_path, 'B-fd-fail', q=0.10)
-    nxt = _ready_pkg(tmp_path, 'B-after', q=0.60)
+    # Path order (no q_upper ranking): poison must sort before nxt.
+    poison = _ready_pkg(tmp_path, 'B-00-fd-fail', q=0.10)
+    nxt = _ready_pkg(tmp_path, 'B-01-after', q=0.60)
 
     def _raise_fd(package: Path, **_kwargs: object) -> dict:
         if package.name == poison.name:

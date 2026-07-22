@@ -1,9 +1,12 @@
 """Lightweight on-disk indexes for Campaign B M3 / pre_m6 queue listing.
 
 Indexes live under ``{PERSIST}/campaign_b/_indexes/`` (~50–100 bytes per
-eligible package; typically <1 MiB total). They cache sort keys only — package
-JSON remains the source of truth. Listing validates entries until
+eligible package; typically <1 MiB total). They cache resume/stage tier only —
+package JSON remains the source of truth. Listing validates entries until
 ``max_candidates`` matches are found (early exit).
+
+Ordering (drain-oriented): resume / mid-pipeline first, then discovery path.
+No ``q_upper`` ranking (screening priority is unused for backlog drain).
 
 Set ``VALIDATED_RG_DISABLE_QUEUE_INDEX=1`` to force full scans (debug).
 """
@@ -17,7 +20,8 @@ from typing import Any
 
 from ..common import atomic_write_json, read_json, utc_now
 
-_INDEX_SCHEMA_VERSION = 1
+# v2: resume/stage-tier only (no q_upper sort keys).
+_INDEX_SCHEMA_VERSION = 2
 _DISABLE_ENV = 'VALIDATED_RG_DISABLE_QUEUE_INDEX'
 _GPU_M3_INDEX_NAME = 'gpu_m3_queue.json'
 _PRE_M6_INDEX_NAME = 'pre_m6_queue.json'
@@ -62,22 +66,16 @@ def _save_index(path: Path, *, kind: str, entries: dict[str, Any]) -> None:
         'entry_count': len(entries),
         'entries': entries,
         'note': (
-            'Sort-key cache only; package ADVANCE/GPU_M3/PRE_M6 JSON is authoritative. '
+            'Resume/stage-tier cache only (no q_upper ranking). '
+            'Package ADVANCE/GPU_M3/PRE_M6 JSON is authoritative. '
             'Rebuild on miss or stale validation.'
         ),
     })
 
 
 def _gpu_m3_sort_tuple(entry: dict[str, Any], rel: str) -> tuple[Any, ...]:
-    tier = int(entry.get('t') or 1)
-    sk = entry.get('sk')
-    if sk == 'resume':
-        sort_key = float('-inf')
-    elif sk is None:
-        sort_key = float('inf')
-    else:
-        sort_key = float(sk)
-    return (tier, sort_key, rel)
+    """Resume tier first, then stable path order (no q_upper)."""
+    return (int(entry['t']) if entry.get('t') is not None else 1, rel)
 
 
 def _gpu_m3_row_for_package(
@@ -86,13 +84,11 @@ def _gpu_m3_row_for_package(
     deprioritize_after: int,
 ) -> dict[str, Any] | None:
     from .gpu_m3_batch import (
-        M3_FAIL_DEPRIORITIZE_AFTER,
         _consecutive_failures,
         _gpu_status,
         _is_ready_for_m3,
         _queue_tier,
     )
-    from .advance_selected import _q_upper_from_package
 
     package = Path(package)
     if not _is_ready_for_m3(package):
@@ -104,18 +100,11 @@ def _gpu_m3_row_for_package(
         fail_count,
         deprioritize_after=int(deprioritize_after),
     )
-    if status == 'M3_RUNNING' and tier == 0:
-        priority = -1.0
-    else:
-        priority = _q_upper_from_package(package)
-    q_upper = None if priority < 0 else (
-        None if priority == float('inf') else priority
-    )
     return {
         'package': str(package),
         'candidate_id': package.name,
-        'q_upper': q_upper,
-        'sort_key': priority,
+        'q_upper': None,
+        'sort_key': float(tier),
         'gpu_status': status,
         'consecutive_failures': fail_count,
         'queue_tier': tier,
@@ -124,16 +113,8 @@ def _gpu_m3_row_for_package(
 
 
 def _gpu_m3_compact(row: dict[str, Any]) -> dict[str, Any]:
-    sk = row.get('sort_key')
-    if sk is not None and float(sk) < 0:
-        sk_out: Any = 'resume'
-    elif sk is None or float(sk) == float('inf'):
-        sk_out = None
-    else:
-        sk_out = float(sk)
     return {
-        't': int(row.get('queue_tier') or 1),
-        'sk': sk_out,
+        't': int(row['queue_tier']) if row.get('queue_tier') is not None else 1,
         'gs': row.get('gpu_status'),
         'cf': int(row.get('consecutive_failures') or 0),
     }
@@ -261,11 +242,7 @@ def _scan_gpu_m3_rows(
             deprioritize_after=deprioritize_after,
         ):
             continue
-        key = (
-            int(row['queue_tier']),
-            float('inf') if row['sort_key'] is None else float(row['sort_key']),
-            row['package'],
-        )
+        key = (int(row['queue_tier']), row['package'])
         if limit is None:
             heap.append((key, row))
             continue
@@ -275,10 +252,8 @@ def _scan_gpu_m3_rows(
             heapq.heapreplace(heap, (key, row))
 
     if limit is None:
-        rows = [r for _, r in sorted(heap, key=lambda x: x[0])]
-        return rows
-    rows = [r for _, r in sorted(heap, key=lambda x: x[0])]
-    return rows[:limit]
+        return [r for _, r in sorted(heap, key=lambda x: x[0])]
+    return [r for _, r in sorted(heap, key=lambda x: x[0])][:limit]
 
 
 def list_gpu_m3_queue_indexed(
@@ -357,7 +332,6 @@ def _pre_m6_row_for_package(
         _m5_done_on_disk,
         _pre_m6_status,
     )
-    from .advance_selected import _q_upper_from_package
 
     package = Path(package)
     persistent_root = Path(persistent_root)
@@ -371,7 +345,6 @@ def _pre_m6_row_for_package(
     gpu = _gpu_m3_status(package)
     if gpu != 'M3_COMPLETE' and not _m3_complete_on_disk(persistent_root, m3_id):
         return None
-    q = _q_upper_from_package(package)
     stage = 'NEED_M4'
     stage_rank = 1
     if isinstance(child.get('M4'), str) and _m4_complete_on_disk(
@@ -387,7 +360,7 @@ def _pre_m6_row_for_package(
     return {
         'package': str(package),
         'candidate_id': package.name,
-        'q_upper': None if q == float('inf') else q,
+        'q_upper': None,
         'stage': stage,
         'stage_rank': stage_rank,
         'm3_run_id': m3_id,
@@ -399,8 +372,7 @@ def _pre_m6_row_for_package(
 
 def _pre_m6_compact(row: dict[str, Any]) -> dict[str, Any]:
     return {
-        'sr': int(row.get('stage_rank') or 1),
-        'sk': row.get('q_upper'),
+        'sr': int(row['stage_rank']) if row.get('stage_rank') is not None else 1,
         'st': row.get('stage'),
         'ps': row.get('pre_m6_status'),
     }
@@ -471,10 +443,8 @@ def sync_pre_m6_index_entry(
 
 
 def _pre_m6_sort_tuple(entry: dict[str, Any], rel: str) -> tuple[Any, ...]:
-    stage_rank = int(entry.get('sr') or 1)
-    sk = entry.get('sk')
-    sort_key = float('inf') if sk is None else float(sk)
-    return (stage_rank, sort_key, rel)
+    """NEED_M5 before NEED_M4, then stable path (no q_upper)."""
+    return (int(entry['sr']) if entry.get('sr') is not None else 1, rel)
 
 
 def _scan_pre_m6_rows(
@@ -506,11 +476,7 @@ def _scan_pre_m6_rows(
             include_errors=include_errors,
         ):
             continue
-        key = (
-            int(row['stage_rank']),
-            float('inf') if row['q_upper'] is None else float(row['q_upper']),
-            row['package'],
-        )
+        key = (int(row['stage_rank']), row['package'])
         if limit is None:
             heap.append((key, row))
             continue
