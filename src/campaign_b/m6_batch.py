@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from ..common import atomic_write_json, utc_now
-from .advance_selected import discover_selected_packages, _q_upper_from_package
 from .pre_m6_batch import _child_ids, _load
 from .schemas import screening_only_payload
 
@@ -75,44 +74,51 @@ def list_m6_queue(
     include_complete: bool = False,
 ) -> list[dict[str, Any]]:
     persistent_root = Path(persistent_root)
-    rows: list[dict[str, Any]] = []
-    for package in discover_selected_packages(persistent_root):
-        if only_campaign_run_id and only_campaign_run_id not in package.parts:
-            continue
-        child = _child_ids(package)
-        if not isinstance(child, dict):
-            continue
-        m5_id = str(child.get('M5') or '')
-        m6_id = str(child.get('M6') or '')
-        if not m5_id.startswith('M5-') or not m6_id.startswith('M6-'):
-            continue
-        gate = _load(package / 'M6_GATE.json') or {}
-        gate_status = str(gate.get('status') or '')
-        ready = _m5_ready_for_m6(persistent_root, m5_id)
-        if not ready['ok'] and gate_status != 'READY_FOR_STAGED_M6':
-            continue
-        if not ready['ok']:
-            # Gate says ready but parent verify would fail — skip with note later.
-            continue
-        if _m6_done(persistent_root, m6_id) and not include_complete:
-            continue
-        q = _q_upper_from_package(package)
-        rows.append({
-            'package': str(package),
-            'candidate_id': package.name,
-            'q_upper': None if q == float('inf') else q,
-            'm5_run_id': m5_id,
-            'm6_run_id': m6_id,
-            'm5_certification_status': ready.get('certification_status'),
-            'gate_status': gate_status or 'READY_FOR_STAGED_M6',
-        })
-    rows.sort(key=lambda r: (
-        float('inf') if r['q_upper'] is None else float(r['q_upper']),
-        r['package'],
-    ))
-    if max_candidates is not None:
-        rows = rows[: int(max_candidates)]
-    return rows
+    from .queue_index import (
+        _scan_m6_rows,
+        ensure_m6_index,
+        list_m6_queue_indexed,
+        rebuild_m6_index,
+    )
+
+    if include_complete:
+        return _scan_m6_rows(
+            persistent_root,
+            only_campaign_run_id=only_campaign_run_id,
+            include_complete=True,
+            max_candidates=max_candidates,
+        )
+
+    ensure_m6_index(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+    )
+    indexed = list_m6_queue_indexed(
+        persistent_root,
+        max_candidates=max_candidates,
+        only_campaign_run_id=only_campaign_run_id,
+    )
+    if indexed:
+        return indexed
+
+    rebuild_m6_index(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+    )
+    indexed = list_m6_queue_indexed(
+        persistent_root,
+        max_candidates=max_candidates,
+        only_campaign_run_id=only_campaign_run_id,
+    )
+    if indexed:
+        return indexed
+
+    return _scan_m6_rows(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+        include_complete=False,
+        max_candidates=max_candidates,
+    )
 
 
 def _m6_params(package: Path, persistent_root: Path, m5_run_id: str) -> dict[str, int]:
@@ -245,6 +251,12 @@ def run_one_m6(
         'updated_at': utc_now(),
         **screening_only_payload(),
     })
+    try:
+        from .queue_index import sync_m6_index_entry
+
+        sync_m6_index_entry(package, persistent_root)
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 
@@ -258,9 +270,15 @@ def run_m6_batch(
 ) -> dict[str, Any]:
     persistent_root = Path(persistent_root)
     project_root = Path(project_root)
+    from .queue_index import fetch_limit_for_batch
+
+    fetch = fetch_limit_for_batch(
+        max_items=int(max_packages),
+        max_queue=int(max_queue),
+    )
     queue = list_m6_queue(
         persistent_root,
-        max_candidates=max_queue,
+        max_candidates=fetch,
         only_campaign_run_id=only_campaign_run_id,
     )
     results: list[dict[str, Any]] = []

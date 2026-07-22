@@ -171,7 +171,7 @@ campaign_b/{campaign_run_id}/selected/{candidate_id}/
 
 `discover_selected_packages`: `{PERSIST}/campaign_b/*/selected/*` で `candidate_manifest.json` があるディレクトリ（`_*` campaign は除外）。
 
-ソート: `_q_upper_from_package`（`s0_result.json` → `independent_verification.json` → `screening_result.json` の順で `q_upper` 等を読む）昇順。
+ソート: discovery / パス順。未 ADVANCE のみ拾い、`max_candidates` で打ち切る（**`q_upper` ソートなし**）。`max_advance<=0` ならスキップ。
 
 ### 2.2 `advance_one_selected` の処理
 
@@ -420,7 +420,7 @@ Campaign B の shared M2 は通常 `j2_max=2` なので M3 も 2 にピンされ
 
 前提: `child_run_ids.json` あり、かつ `GPU_M3.json == M3_COMPLETE` または disk 上で M3 report/acceptance 完了。
 
-キュー優先: `NEED_M5`（M4 完了済）を `NEED_M4` より先。q_upper 昇順。
+キュー優先: `NEED_M5`（M4 完了済）を `NEED_M4` より先。同一 stage 内はパス順（**`q_upper` ソートなし**）。
 
 デフォルト除外（`include_errors=False`、M3 の `M3_BLOCKED_NONFINITE` と同型）:
 
@@ -472,7 +472,7 @@ Campaign B の shared M2 は通常 `j2_max=2` なので M3 も 2 にピンされ
 
 ### 5.1 キュー
 
-M4 完了済みで、`M5_obligation_report.json` が無い、または `all_closed` でない / `open_obligations` が残るパッケージ。q_upper 昇順。
+M4 完了済みで、`M5_obligation_report.json` が無い、または `all_closed` でない / `open_obligations` が残るパッケージ。パス順（**`q_upper` ソートなし**）。索引: `campaign_b/_indexes/obligation_queue.json`。
 
 ### 5.2 再評価（`reevaluate_one`）
 

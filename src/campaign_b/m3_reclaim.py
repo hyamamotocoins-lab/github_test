@@ -1131,16 +1131,22 @@ def auto_strip_after_pipeline_round(
         out = summary.as_dict()
         out['preferred_run_ids'] = sorted(preferred)
     else:
-        summary = strip_eligible_m3_checkpoints(
-            persistent_root,
-            execute=execute,
-            only_run_ids=None,
-        )
-        out = summary.as_dict()
-        out['preferred_run_ids'] = []
-        out['fallback_full_scan'] = True
+        # Empty preferred: do NOT full-scan every round (expensive on NFS with
+        # thousands of M3 runs). Session-start force_full_scan covers backlog.
+        out = {
+            'stripped': 0,
+            'bytes_freed': 0,
+            'bytes_freed_human': '0 B',
+            'run_ids': [],
+            'preferred_run_ids': [],
+            'fallback_full_scan': False,
+            'skipped_empty_preferred': True,
+            'scope': 'noop',
+        }
 
-    if persist_m3_cap_gib is not None:
+    if persist_m3_cap_gib is not None and (
+        force_full_scan or preferred or int(out.get('stripped') or 0) > 0
+    ):
         cap = enforce_persist_m3_cap(
             persistent_root,
             cap_gib=float(persist_m3_cap_gib),

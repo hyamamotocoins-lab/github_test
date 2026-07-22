@@ -246,6 +246,18 @@ def advance_one_selected(
     }
 
 
+def _already_advanced(package: Path, *, force: bool) -> bool:
+    if force:
+        return False
+    advance_path = Path(package) / 'ADVANCE.json'
+    if not advance_path.is_file():
+        return False
+    existing = read_json(advance_path)
+    return isinstance(existing, dict) and existing.get('status') in {
+        'LINEAGE_PLANNED', 'FIXTURE_RESIDUAL_DONE', 'READY_FOR_M3',
+    }
+
+
 def run_advance_selected(
     *,
     persistent_root: Path,
@@ -261,9 +273,17 @@ def run_advance_selected(
         needle = f'/campaign_b/{only_campaign_run_id}/'
         packages = [p for p in packages if needle in str(p) or p.parts[-3] == only_campaign_run_id]
 
-    ranked = sorted(packages, key=lambda p: (_q_upper_from_package(p), str(p)))
-    if max_candidates is not None:
-        ranked = ranked[: int(max_candidates)]
+    # Discovery order only (no q_upper sort). Prefer packages that still need
+    # advancement; already-advanced packages are skipped without ranking I/O.
+    ranked: list[Path] = []
+    skipped_already = 0
+    for package in packages:
+        if _already_advanced(package, force=force):
+            skipped_already += 1
+            continue
+        ranked.append(package)
+        if max_candidates is not None and len(ranked) >= int(max_candidates):
+            break
 
     parent_id = parent_m6_run_id or M6_RUN_ID_FROZEN
     parent_pkg = find_parent_m6_package(persistent_root, parent_m6_run_id=parent_id)
@@ -306,7 +326,7 @@ def run_advance_selected(
         'discovered': len(packages),
         'attempted': len(ranked),
         'advanced': len(advanced),
-        'skipped': sum(1 for r in results if r.get('skipped')),
+        'skipped': sum(1 for r in results if r.get('skipped')) + skipped_already,
         'errors': sum(1 for r in results if r.get('error')),
         'ready_for_m3': sum(1 for r in results if r.get('status') == 'READY_FOR_M3'),
         'fixture_done': sum(1 for r in results if r.get('status') == 'FIXTURE_RESIDUAL_DONE'),

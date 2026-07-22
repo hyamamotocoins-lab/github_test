@@ -106,6 +106,14 @@ def test_pre_m6_index_lists_m3_complete(tmp_path: Path) -> None:
     assert queue[0]['stage'] == 'NEED_M4'
 
 
+def test_fetch_limit_caps_max_queue_overfetch() -> None:
+    from src.campaign_b.queue_index import fetch_limit_for_batch
+
+    assert fetch_limit_for_batch(max_items=1, max_queue=2000) == 8
+    assert fetch_limit_for_batch(max_items=2, max_queue=2000) == 16
+    assert fetch_limit_for_batch(max_items=10, max_queue=20) == 20
+
+
 def test_disable_queue_index_falls_back_to_scan(tmp_path: Path, monkeypatch) -> None:
     _pkg(tmp_path, 'M7-D', 'CAND-one', q=0.6)
     rebuild_gpu_m3_index(tmp_path)

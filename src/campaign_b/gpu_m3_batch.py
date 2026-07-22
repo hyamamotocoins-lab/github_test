@@ -716,9 +716,15 @@ def run_gpu_m3_batch(
     """Run up to max_sessions sequential GPU M3 sessions (resume-friendly)."""
     persistent_root = Path(persistent_root)
     project_root = Path(project_root)
+    from .queue_index import fetch_limit_for_batch
+
+    fetch = fetch_limit_for_batch(
+        max_items=int(max_sessions),
+        max_queue=int(max_queue),
+    )
     queue = list_gpu_m3_queue(
         persistent_root,
-        max_candidates=max_queue,
+        max_candidates=fetch,
         only_campaign_run_id=only_campaign_run_id,
         include_errors=include_errors,
     )

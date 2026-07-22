@@ -214,9 +214,15 @@ def _write_pre_m6(package: Path, payload: dict[str, Any]) -> None:
         atomic_write_json(package / 'ADVANCE.json', advance)
     try:
         from .gpu_m3_batch import _persistent_root_from_package
-        from .queue_index import sync_pre_m6_index_entry
+        from .queue_index import (
+            sync_obligation_index_entry,
+            sync_pre_m6_index_entry,
+        )
 
-        sync_pre_m6_index_entry(package, _persistent_root_from_package(package))
+        root = _persistent_root_from_package(package)
+        sync_pre_m6_index_entry(package, root)
+        if doc.get('status') == 'PRE_M6_READY':
+            sync_obligation_index_entry(package, root)
     except Exception:  # noqa: BLE001 — best-effort index maintenance
         pass
 
@@ -564,8 +570,14 @@ def run_pre_m6_batch(
 ) -> dict[str, Any]:
     persistent_root = Path(persistent_root)
     project_root = Path(project_root)
-    # Over-fetch so skipping already-blocked mid-scan still fills max_packages.
-    scan_limit = max(int(max_queue), int(max_packages) * 8)
+    from .queue_index import fetch_limit_for_batch
+
+    # Over-fetch a little so mid-scan blocked skips can still fill max_packages.
+    scan_limit = fetch_limit_for_batch(
+        max_items=int(max_packages),
+        max_queue=int(max_queue),
+        oversample=8,
+    )
     queue = list_pre_m6_queue(
         persistent_root,
         max_candidates=scan_limit,

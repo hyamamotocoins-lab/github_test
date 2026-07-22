@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from ..common import atomic_write_json, utc_now
-from .advance_selected import discover_selected_packages, _q_upper_from_package
 from .pre_m6_batch import (
     _child_ids,
     _load,
@@ -32,48 +31,42 @@ def list_obligation_queue(
     only_campaign_run_id: str | None = None,
 ) -> list[dict[str, Any]]:
     persistent_root = Path(persistent_root)
-    rows: list[dict[str, Any]] = []
-    for package in discover_selected_packages(persistent_root):
-        if only_campaign_run_id and only_campaign_run_id not in package.parts:
-            continue
-        child = _child_ids(package)
-        if not isinstance(child, dict):
-            continue
-        m4_id = str(child.get('M4') or '')
-        m5_id = str(child.get('M5') or '')
-        if not m4_id.startswith('M4-') or not m5_id.startswith('M5-'):
-            continue
-        if not _m4_complete_on_disk(persistent_root, m4_id):
-            continue
-        obl_path = (
-            Path(persistent_root) / 'runs' / m5_id / 'reports' / 'M5_obligation_report.json'
-        )
-        open_ids: list[str] = []
-        all_closed = False
-        if obl_path.is_file():
-            doc = _load(obl_path)
-            if isinstance(doc, dict):
-                open_ids = list(doc.get('open_obligations') or [])
-                all_closed = bool(doc.get('all_closed'))
-        if all_closed and not open_ids:
-            continue
-        q = _q_upper_from_package(package)
-        rows.append({
-            'package': str(package),
-            'candidate_id': package.name,
-            'q_upper': None if q == float('inf') else q,
-            'm4_run_id': m4_id,
-            'm5_run_id': m5_id,
-            'open_obligations': open_ids,
-            'pre_m6_status': _pre_m6_status(package),
-        })
-    rows.sort(key=lambda r: (
-        float('inf') if r['q_upper'] is None else float(r['q_upper']),
-        r['package'],
-    ))
-    if max_candidates is not None:
-        rows = rows[: int(max_candidates)]
-    return rows
+    from .queue_index import (
+        _scan_obligation_rows,
+        ensure_obligation_index,
+        list_obligation_queue_indexed,
+        rebuild_obligation_index,
+    )
+
+    ensure_obligation_index(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+    )
+    indexed = list_obligation_queue_indexed(
+        persistent_root,
+        max_candidates=max_candidates,
+        only_campaign_run_id=only_campaign_run_id,
+    )
+    if indexed:
+        return indexed
+
+    rebuild_obligation_index(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+    )
+    indexed = list_obligation_queue_indexed(
+        persistent_root,
+        max_candidates=max_candidates,
+        only_campaign_run_id=only_campaign_run_id,
+    )
+    if indexed:
+        return indexed
+
+    return _scan_obligation_rows(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+        max_candidates=max_candidates,
+    )
 
 
 def reevaluate_one(
@@ -150,6 +143,13 @@ def reevaluate_one(
             **screening_only_payload(),
             'updated_at': utc_now(),
         })
+    try:
+        from .queue_index import sync_m6_index_entry, sync_obligation_index_entry
+
+        sync_obligation_index_entry(package, persistent_root)
+        sync_m6_index_entry(package, persistent_root)
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 
@@ -161,9 +161,15 @@ def run_close_obligations_batch(
     max_queue: int = 50,
     only_campaign_run_id: str | None = None,
 ) -> dict[str, Any]:
+    from .queue_index import fetch_limit_for_batch
+
+    fetch = fetch_limit_for_batch(
+        max_items=int(max_packages),
+        max_queue=int(max_queue),
+    )
     queue = list_obligation_queue(
         persistent_root,
-        max_candidates=max_queue,
+        max_candidates=fetch,
         only_campaign_run_id=only_campaign_run_id,
     )
     results: list[dict[str, Any]] = []

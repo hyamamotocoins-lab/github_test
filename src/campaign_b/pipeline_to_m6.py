@@ -197,19 +197,26 @@ def run_pipeline_to_m6(
             packages_attempted = 0
 
             if not skip_advance:
-                adv = run_advance_selected(
-                    persistent_root=persistent_root,
-                    max_candidates=max_advance,
-                    force=False,
-                    only_campaign_run_id=only_campaign_run_id,
-                )
-                round_doc['stages']['advance'] = {
-                    'discovered': adv.get('discovered'),
-                    'advanced': adv.get('advanced'),
-                    'ready_for_m3': adv.get('ready_for_m3'),
-                    'errors': adv.get('errors'),
-                }
-                progress += int(adv.get('advanced') or 0)
+                if max_advance is not None and int(max_advance) <= 0:
+                    round_doc['stages']['advance'] = {
+                        'skipped': True,
+                        'reason': 'max_advance<=0',
+                        'advanced': 0,
+                    }
+                else:
+                    adv = run_advance_selected(
+                        persistent_root=persistent_root,
+                        max_candidates=max_advance,
+                        force=False,
+                        only_campaign_run_id=only_campaign_run_id,
+                    )
+                    round_doc['stages']['advance'] = {
+                        'discovered': adv.get('discovered'),
+                        'advanced': adv.get('advanced'),
+                        'ready_for_m3': adv.get('ready_for_m3'),
+                        'errors': adv.get('errors'),
+                    }
+                    progress += int(adv.get('advanced') or 0)
 
             if not skip_m3:
                 m3 = run_gpu_m3_batch(
