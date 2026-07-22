@@ -573,6 +573,20 @@ advance → gpu_m3 → pre_m6 → obligations → m6
 
 ---
 
+## 7b. 一時停止 export — `persist_export.py` / notebook 100
+
+Paperspace を止めてローカルに退避するとき:
+
+1. 97/96 を止め、GPU lease を確認（`scripts/release_gpu_lane_lease.py --status`）。
+2. `scripts/persist_export_pause.py`（または notebook **100**）で
+   `{PERSIST}` を **`/storage/exports/`**（または `/notebooks/persist_exports/`）へ zip。
+3. ローカル download + SHA-256 確認後、`--purge --i-understand-purge PURGE_PERSIST_ROOT`
+   で Paperspace 上の persist を削除。
+
+詳細: [campaign_b_persist_export_pause.md](./campaign_b_persist_export_pause.md)。
+
+---
+
 ## 8. Persist ディレクトリマップ
 
 ```
