@@ -227,6 +227,12 @@ NaN/Inf で JSON シリアライズに失敗したセッションは fail-closed
 
 バッチは `max_sessions` 件だけ **逐次** `run_one_gpu_m3`（単一 GPU 前提）。
 
+**キュー索引（v2026-07）:** `{PERSIST}/campaign_b/_indexes/gpu_m3_queue.json` と
+`pre_m6_queue.json` にソートキーだけをキャッシュ（~50–100 B/件、合計通常 **<1 MiB**）。
+`max_candidates=1` 運用では索引を先頭から検証して early-exit（全 ~9000 件走査しない）。
+初回または索引欠落時のみフル再構築。`VALIDATED_RG_DISABLE_QUEUE_INDEX=1` で従来の全走査に戻す。
+状態更新は `ADVANCE` / `GPU_M3` / `PRE_M6` 書き込み時に増分同期。
+
 ### 3.2 `prepare_package_for_m3`
 
 パッケージを M3 実行可能な状態にする（orchestrator 起動前）:

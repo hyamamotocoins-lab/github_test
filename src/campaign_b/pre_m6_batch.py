@@ -146,54 +146,57 @@ def list_pre_m6_queue(
     matching list_gpu_m3_queue's M3_BLOCKED_NONFINITE pattern.
     """
     persistent_root = Path(persistent_root)
-    rows: list[dict[str, Any]] = []
-    for package in discover_selected_packages(persistent_root):
-        if only_campaign_run_id and only_campaign_run_id not in package.parts:
-            continue
-        status = _pre_m6_status(package)
-        if status == 'PRE_M6_READY' and not include_complete:
-            continue
-        if status in PRE_M6_BLOCKED_EXCLUDED and not include_errors:
-            continue
-        child = _child_ids(package)
-        if not isinstance(child, dict):
-            continue
-        m3_id = child.get('M3')
-        if not isinstance(m3_id, str) or not m3_id.startswith('M3-'):
-            continue
-        gpu = _gpu_m3_status(package)
-        if gpu != 'M3_COMPLETE' and not _m3_complete_on_disk(persistent_root, m3_id):
-            continue
-        q = _q_upper_from_package(package)
-        stage = 'NEED_M4'
-        if isinstance(child.get('M4'), str) and _m4_complete_on_disk(
-            persistent_root, str(child['M4']),
-        ):
-            stage = 'NEED_M5'
-        if isinstance(child.get('M5'), str) and _m5_done_on_disk(
-            persistent_root, str(child['M5']),
-        ):
-            stage = 'PRE_M6_READY'
-            if not include_complete:
-                continue
-        rows.append({
-            'package': str(package),
-            'candidate_id': package.name,
-            'q_upper': None if q == float('inf') else q,
-            'stage': stage,
-            'm3_run_id': m3_id,
-            'm4_run_id': child.get('M4'),
-            'm5_run_id': child.get('M5'),
-            'pre_m6_status': status,
-        })
-    rows.sort(key=lambda r: (
-        0 if r['stage'] == 'NEED_M5' else 1,  # finish M5 before new M4
-        float('inf') if r['q_upper'] is None else float(r['q_upper']),
-        r['package'],
-    ))
-    if max_candidates is not None:
-        rows = rows[: int(max_candidates)]
-    return rows
+    from .queue_index import (
+        _scan_pre_m6_rows,
+        ensure_pre_m6_index,
+        list_pre_m6_queue_indexed,
+        rebuild_pre_m6_index,
+    )
+
+    if include_errors or include_complete:
+        return _scan_pre_m6_rows(
+            persistent_root,
+            only_campaign_run_id=only_campaign_run_id,
+            include_complete=include_complete,
+            include_errors=include_errors,
+            max_candidates=max_candidates,
+        )
+
+    ensure_pre_m6_index(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+    )
+    indexed = list_pre_m6_queue_indexed(
+        persistent_root,
+        max_candidates=max_candidates,
+        only_campaign_run_id=only_campaign_run_id,
+        include_complete=include_complete,
+        include_errors=include_errors,
+    )
+    if indexed:
+        return indexed
+
+    rebuild_pre_m6_index(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+    )
+    indexed = list_pre_m6_queue_indexed(
+        persistent_root,
+        max_candidates=max_candidates,
+        only_campaign_run_id=only_campaign_run_id,
+        include_complete=include_complete,
+        include_errors=include_errors,
+    )
+    if indexed:
+        return indexed
+
+    return _scan_pre_m6_rows(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+        include_complete=include_complete,
+        include_errors=include_errors,
+        max_candidates=max_candidates,
+    )
 
 
 def _write_pre_m6(package: Path, payload: dict[str, Any]) -> None:
@@ -209,6 +212,13 @@ def _write_pre_m6(package: Path, payload: dict[str, Any]) -> None:
             'updated_at': utc_now(),
         }
         atomic_write_json(package / 'ADVANCE.json', advance)
+    try:
+        from .gpu_m3_batch import _persistent_root_from_package
+        from .queue_index import sync_pre_m6_index_entry
+
+        sync_pre_m6_index_entry(package, _persistent_root_from_package(package))
+    except Exception:  # noqa: BLE001 — best-effort index maintenance
+        pass
 
 
 def prepare_m4_overrides(

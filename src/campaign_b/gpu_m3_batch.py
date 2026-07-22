@@ -160,66 +160,65 @@ def list_gpu_m3_queue(
     include_errors: bool = False,
     fail_deprioritize_after: int = M3_FAIL_DEPRIORITIZE_AFTER,
 ) -> list[dict[str, Any]]:
-    packages = discover_selected_packages(persistent_root)
-    if only_campaign_run_id:
-        packages = [
-            p for p in packages
-            if only_campaign_run_id in p.parts
-        ]
-    rows: list[dict[str, Any]] = []
+    persistent_root = Path(persistent_root)
     deprioritize_after = max(1, int(fail_deprioritize_after))
-    blocked_excluded = {'M3_COMPLETE', 'M3_BLOCKED_BAD_M2', 'M3_BLOCKED_NONFINITE'}
-    for package in packages:
-        if not _is_ready_for_m3(package):
-            continue
-        status = _gpu_status(package)
-        if status in blocked_excluded and not include_complete:
-            # NONFINITE / BAD_M2 stay out unless explicitly re-included.
-            if status == 'M3_COMPLETE' or not include_errors:
-                continue
-        if status == 'M3_ERROR' and not include_errors:
-            # Leave durable errors out of the default resume front so fresh
-            # READY_FOR_M3 (no GPU_M3) packages get scheduled.
-            continue
-        fail_count = _consecutive_failures(package)
-        if (
-            not include_errors
-            and fail_count >= deprioritize_after
-            and status in {'M3_RUNNING', 'M3_CHECKPOINT', 'M3_ERROR', None}
-        ):
-            # Repeated identical resume failures: drop from default queue.
-            # Operators can pass include_errors=True to retry.
-            continue
-        tier = _queue_tier(
-            status, fail_count, deprioritize_after=deprioritize_after,
+    from .queue_index import (
+        _scan_gpu_m3_rows,
+        ensure_gpu_m3_index,
+        list_gpu_m3_queue_indexed,
+        rebuild_gpu_m3_index,
+    )
+
+    if include_errors or include_complete:
+        return _scan_gpu_m3_rows(
+            persistent_root,
+            only_campaign_run_id=only_campaign_run_id,
+            include_complete=include_complete,
+            include_errors=include_errors,
+            fail_deprioritize_after=deprioritize_after,
+            max_candidates=max_candidates,
         )
-        if status == 'M3_RUNNING' and tier == 0:
-            # Prefer resume of healthy in-flight runs.
-            priority = -1.0
-        else:
-            priority = _q_upper_from_package(package)
-        q_upper = None if priority < 0 else (
-            None if priority == float('inf') else priority
-        )
-        rows.append({
-            'package': str(package),
-            'candidate_id': package.name,
-            'q_upper': q_upper,
-            'sort_key': priority,
-            'gpu_status': status,
-            'consecutive_failures': fail_count,
-            'queue_tier': tier,
-            'deprioritized': tier >= 2,
-        })
-    # tier 0 resume → tier 1 fresh READY → tier 2 repeated failures / errors
-    rows.sort(key=lambda r: (
-        int(r['queue_tier']),
-        float('inf') if r['sort_key'] is None else float(r['sort_key']),
-        r['package'],
-    ))
-    if max_candidates is not None:
-        rows = rows[: int(max_candidates)]
-    return rows
+
+    ensure_gpu_m3_index(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+        fail_deprioritize_after=deprioritize_after,
+    )
+    indexed = list_gpu_m3_queue_indexed(
+        persistent_root,
+        max_candidates=max_candidates,
+        only_campaign_run_id=only_campaign_run_id,
+        include_complete=include_complete,
+        include_errors=include_errors,
+        fail_deprioritize_after=deprioritize_after,
+    )
+    if indexed:
+        return indexed
+
+    rebuild_gpu_m3_index(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+        deprioritize_after=deprioritize_after,
+    )
+    indexed = list_gpu_m3_queue_indexed(
+        persistent_root,
+        max_candidates=max_candidates,
+        only_campaign_run_id=only_campaign_run_id,
+        include_complete=include_complete,
+        include_errors=include_errors,
+        fail_deprioritize_after=deprioritize_after,
+    )
+    if indexed:
+        return indexed
+
+    return _scan_gpu_m3_rows(
+        persistent_root,
+        only_campaign_run_id=only_campaign_run_id,
+        include_complete=include_complete,
+        include_errors=include_errors,
+        fail_deprioritize_after=deprioritize_after,
+        max_candidates=max_candidates,
+    )
 
 
 def _parent_m2_j2_max(m2_run: Path) -> int:
@@ -426,7 +425,20 @@ def build_m3_config(package: Path, *, project_root: Path):
     return M3Config(**base)
 
 
-def _write_gpu_status(package: Path, payload: dict[str, Any]) -> None:
+def _persistent_root_from_package(package: Path) -> Path:
+    parts = Path(package).resolve().parts
+    if 'campaign_b' not in parts:
+        raise GpuM3BatchError(f'package not under campaign_b: {package}')
+    idx = parts.index('campaign_b')
+    return Path(*parts[:idx])
+
+
+def _write_gpu_status(
+    package: Path,
+    payload: dict[str, Any],
+    *,
+    persistent_root: Path | None = None,
+) -> None:
     doc = {
         **payload,
         'updated_at': utc_now(),
@@ -442,6 +454,20 @@ def _write_gpu_status(package: Path, payload: dict[str, Any]) -> None:
             'updated_at': utc_now(),
         }
         atomic_write_json(package / 'ADVANCE.json', advance)
+    root = persistent_root or _persistent_root_from_package(package)
+    try:
+        from .queue_index import sync_gpu_m3_index_entry, sync_pre_m6_index_entry
+
+        sync_gpu_m3_index_entry(package, root)
+    except Exception:  # noqa: BLE001 — best-effort index maintenance
+        pass
+    if doc.get('status') == 'M3_COMPLETE':
+        try:
+            from .queue_index import sync_pre_m6_index_entry
+
+            sync_pre_m6_index_entry(package, root)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def write_m3_recipe_stub(
@@ -585,7 +611,7 @@ def run_one_gpu_m3(
         'm3_run_id': m3_run_id,
         'phase': 'starting',
         'consecutive_failures': prev_fail,
-    })
+    }, persistent_root=persistent_root)
     try:
         from .execution_keys import refresh_gpu_lane_heartbeat
 
@@ -636,7 +662,7 @@ def run_one_gpu_m3(
             'm3_recipe_written': False,
             **screening_only_payload(),
         }
-        _write_gpu_status(package, out)
+        _write_gpu_status(package, out, persistent_root=persistent_root)
         raise GpuM3BatchError(out['error'])
     complete = _is_m3_already_complete_result(
         clean_result if isinstance(clean_result, dict) else result,
@@ -672,7 +698,7 @@ def run_one_gpu_m3(
         'nonfinite_values_present': False,
         **screening_only_payload(),
     }
-    _write_gpu_status(package, out)
+    _write_gpu_status(package, out, persistent_root=persistent_root)
     return out
 
 
@@ -772,7 +798,7 @@ def run_gpu_m3_batch(
                 'm2_run_id': prev.get('m2_run_id'),
                 'm3_run_id': prev.get('m3_run_id'),
                 'deprioritized': True,
-            })
+            }, persistent_root=persistent_root)
 
     from .m3_reclaim import fmt_bytes
 

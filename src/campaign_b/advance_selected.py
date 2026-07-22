@@ -224,6 +224,17 @@ def advance_one_selected(
     }
     atomic_write_json(advance_path, advance)
     atomic_write_json(package / 'advance_result.json', advance)
+    if status == 'READY_FOR_M3':
+        try:
+            from .gpu_m3_batch import _persistent_root_from_package
+            from .queue_index import sync_gpu_m3_index_entry
+
+            sync_gpu_m3_index_entry(
+                package,
+                _persistent_root_from_package(package),
+            )
+        except Exception:  # noqa: BLE001 — best-effort index maintenance
+            pass
     return {
         'package': str(package),
         'candidate_id': candidate_id,
