@@ -26,8 +26,26 @@ Safety (fail-closed)
 7. After purge, writes ``/storage/exports/<name>_PURGED.json`` pointing at
    the archive.
 
-Paperspace
-----------
+## Tiers
+
+- **`tier_a` (default):** ``campaign_b/`` + ``runs/M2|M4|M5|M6-*`` +
+  ``runs/M3-*`` excluding ``checkpoints/`` + top-level misc.
+  Typical size ≈ **2 GiB** (vs ≈57 GiB full).
+- **`full`:** entire persist root (includes M3 checkpoints).
+
+## Always included extra: ``/storage/ssh``
+
+By default the archive also packs ``{persist.parent}/ssh``
+(``/storage/ssh`` on Paperspace) as zip members ``storage/ssh/...``.
+Purge **never** deletes ssh — only the persist root.
+
+Restore::
+
+  cd /storage && unzip -o validated_4d_su2_rg_tier_a_....zip
+  # → /storage/validated_4d_su2_rg/...
+  # → /storage/ssh/...
+
+## Paperspace
 ::
 
   cd /notebooks/validated_4d_su2_rg_codex_bundle

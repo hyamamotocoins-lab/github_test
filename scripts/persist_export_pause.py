@@ -1,35 +1,16 @@
 #!/usr/bin/env python3
-"""Pause Paperspace: zip persist root for download, optionally purge it.
+"""Pause Paperspace: zip persist (+ /storage/ssh) for download, optional purge.
 
-Safety
-------
-- Default is dry-run (plan only).
-- ``--execute`` writes the zip + ``.sha256`` + ``.manifest.json`` *outside*
-  the persist root (default: ``/storage/exports/``).
-- ``--purge`` deletes persist contents only after CRC + sha256 verify, and
-  only with ``--i-understand-purge PURGE_PERSIST_ROOT``.
-- Refuses a live GPU lane lease unless ``--allow-live-gpu-lease``.
-- Refuses if free disk < source size + 2 GiB margin (override with
-  ``--margin-gib``).
+Default tier is ``tier_a`` (~2 GiB typical): campaign_b + M2/M4/M5/M6 +
+M3 without checkpoints + ``/storage/ssh``. Use ``--tier full`` for the
+entire persist tree (~57 GiB).
 
-Paperspace (from repo root)::
+Zip layout (restore: ``cd /storage && unzip -o ARCHIVE.zip``)::
 
-  export VALIDATED_RG_PERSIST_ROOT=/storage/validated_4d_su2_rg
+  validated_4d_su2_rg/...
+  storage/ssh/...
 
-  # 1) Plan / free-space check
-  python scripts/persist_export_pause.py
-
-  # 2) Create downloadable zip (keeps persist)
-  python scripts/persist_export_pause.py --execute
-
-  # 3) After downloading the zip locally, free Paperspace disk:
-  python scripts/persist_export_pause.py --execute --purge-only \\
-      --archive-path /storage/exports/validated_4d_su2_rg_....zip \\
-      --i-understand-purge PURGE_PERSIST_ROOT
-
-  # Jupyter UI download: put the zip under /notebooks
-  python scripts/persist_export_pause.py --execute \\
-      --export-dir /notebooks/persist_exports
+Purge deletes persist only — **never** ``/storage/ssh``.
 """
 
 from __future__ import annotations
@@ -45,6 +26,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.campaign_b.persist_export import (  # noqa: E402
+    DEFAULT_EXPORT_TIER,
+    DISCARD_M3_CHECKPOINTS_CONFIRM,
     PURGE_CONFIRM,
     PersistExportError,
     export_and_optional_purge,
@@ -57,7 +40,7 @@ from src.campaign_b.persist_export import (  # noqa: E402
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            'Zip VALIDATED_RG_PERSIST_ROOT for download; optional purge after verify.'
+            'Zip persist (+ /storage/ssh) for download; optional purge after verify.'
         ),
     )
     parser.add_argument(
@@ -80,50 +63,54 @@ def main(argv: list[str] | None = None) -> int:
         help='Explicit zip path (must be outside persist root)',
     )
     parser.add_argument(
-        '--execute',
-        action='store_true',
-        help='Write the archive (default: dry-run plan only)',
+        '--tier',
+        default=DEFAULT_EXPORT_TIER,
+        choices=['tier_a', 'full'],
+        help='tier_a=hard-to-restore (~2GiB); full=entire persist',
     )
     parser.add_argument(
-        '--compress',
+        '--include-ssh',
+        dest='include_ssh',
         action='store_true',
-        help='Use DEFLATE (slower; tensors rarely shrink much)',
+        default=True,
+        help='Include /storage/ssh (default: on)',
     )
+    parser.add_argument(
+        '--no-include-ssh',
+        dest='include_ssh',
+        action='store_false',
+        help='Omit /storage/ssh from the archive',
+    )
+    parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--compress', action='store_true')
     parser.add_argument(
         '--purge',
         action='store_true',
-        help='After verified archive, delete persist root contents',
+        help='After verified archive, delete persist root (not ssh)',
     )
     parser.add_argument(
         '--purge-only',
         action='store_true',
-        help=(
-            'Skip zip; verify --archive-path and purge persist '
-            f'(requires --execute and --i-understand-purge {PURGE_CONFIRM})'
-        ),
+        help='Skip zip; verify --archive-path and purge persist',
     )
     parser.add_argument(
         '--i-understand-purge',
         dest='confirm_purge',
         default=None,
-        help=f'Must equal {PURGE_CONFIRM} when --purge / --purge-only is set',
+        help=f'Must equal {PURGE_CONFIRM}',
     )
     parser.add_argument(
-        '--allow-live-gpu-lease',
-        action='store_true',
-        help='Do not block when gpu_lane.json PID looks alive',
+        '--i-understand-discard-m3-checkpoints',
+        dest='confirm_discard_m3',
+        default=None,
+        help=(
+            f'Required for tier_a purge; must equal '
+            f'{DISCARD_M3_CHECKPOINTS_CONFIRM}'
+        ),
     )
-    parser.add_argument(
-        '--margin-gib',
-        type=float,
-        default=2.0,
-        help='Extra free-space margin beyond source size (default 2 GiB)',
-    )
-    parser.add_argument(
-        '--plan-only',
-        action='store_true',
-        help='Print plan JSON and exit (same as default without --execute)',
-    )
+    parser.add_argument('--allow-live-gpu-lease', action='store_true')
+    parser.add_argument('--margin-gib', type=float, default=2.0)
+    parser.add_argument('--plan-only', action='store_true')
     args = parser.parse_args(argv)
 
     margin = int(float(args.margin_gib) * (1024**3))
@@ -139,17 +126,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f'ERROR: {exc}', file=sys.stderr)
             return 1
         if not args.execute:
-            print(
-                'Dry-run purge-only. Re-run with --execute '
-                f'--i-understand-purge {PURGE_CONFIRM}',
-                file=sys.stderr,
-            )
             preview = purge_persistent_root(
                 persist,
                 archive_path=args.archive_path,
                 confirm_purge=args.confirm_purge or PURGE_CONFIRM,
                 execute=False,
                 require_verified=True,
+                tier=args.tier,
+                confirm_discard_m3_checkpoints=(
+                    args.confirm_discard_m3 or DISCARD_M3_CHECKPOINTS_CONFIRM
+                ),
             )
             print(json.dumps(
                 {'verify': v, 'purge_preview': preview},
@@ -163,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
                 confirm_purge=args.confirm_purge or '',
                 execute=True,
                 expected_sha256=v['sha256'],
+                tier=args.tier,
+                confirm_discard_m3_checkpoints=args.confirm_discard_m3,
             )
         except PersistExportError as exc:
             print(f'ERROR: {exc}', file=sys.stderr)
@@ -177,6 +165,8 @@ def main(argv: list[str] | None = None) -> int:
             export_dir=args.export_dir,
             margin_bytes=margin,
             allow_live_gpu_lease=args.allow_live_gpu_lease,
+            tier=args.tier,
+            include_ssh=args.include_ssh,
         )
         print(json.dumps(plan.to_dict(), indent=2, ensure_ascii=False, default=str))
         if not plan.ok:
@@ -184,9 +174,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if not args.execute:
             print(
-                '\nDry-run only. Re-run with --execute to write the zip. '
-                'Add --purge --i-understand-purge PURGE_PERSIST_ROOT to delete '
-                'persist after verify.',
+                f'\nDry-run (tier={args.tier}, include_ssh={args.include_ssh}). '
+                'Re-run with --execute to write the zip.',
                 file=sys.stderr,
             )
         return 0
@@ -200,8 +189,11 @@ def main(argv: list[str] | None = None) -> int:
             compress=args.compress,
             purge=args.purge,
             confirm_purge=args.confirm_purge,
+            confirm_discard_m3_checkpoints=args.confirm_discard_m3,
             allow_live_gpu_lease=args.allow_live_gpu_lease,
             margin_bytes=margin,
+            tier=args.tier,
+            include_ssh=args.include_ssh,
             progress_cb=lambda msg: print(msg, file=sys.stderr, flush=True),
         )
     except PersistExportError as exc:
@@ -212,18 +204,11 @@ def main(argv: list[str] | None = None) -> int:
     if summary.get('status') == 'BLOCKED':
         return 2
     result = summary.get('result') or {}
-    archive = result.get('archive_path')
-    if archive:
-        print(f'\nDownload: {archive}', file=sys.stderr)
+    if result.get('archive_path'):
+        print(f"\nDownload: {result['archive_path']}", file=sys.stderr)
         print(f"SHA256:   {result.get('sha256')}", file=sys.stderr)
-        if result.get('purged'):
-            print('Persist root purged after verify.', file=sys.stderr)
-        else:
-            print(
-                'Persist root kept. After local download, re-run with '
-                '--execute --purge --i-understand-purge PURGE_PERSIST_ROOT',
-                file=sys.stderr,
-            )
+        print(f"tier:     {result.get('tier')}", file=sys.stderr)
+        print('Restore:  cd /storage && unzip -o ARCHIVE.zip', file=sys.stderr)
     return 0
 
 
